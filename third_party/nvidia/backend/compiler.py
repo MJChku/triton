@@ -180,6 +180,7 @@ class CUDABackend(BaseBackend):
         passes.ttgpuir.add_remove_layout_conversions(pm)
         passes.ttgpuir.add_reduce_data_duplication(pm)
         passes.ttgpuir.add_reorder_instructions(pm)
+        # passes.ttgpuir.add_emit_thread_iters(pm)
         passes.common.add_cse(pm)
         passes.common.add_symbol_dce(pm)
         if capability // 10 >= 9:
@@ -205,7 +206,9 @@ class CUDABackend(BaseBackend):
         passes.convert.add_scf_to_cf(pm)
         passes.convert.add_index_to_llvmir(pm)
         passes.ttgpuir.add_allocate_shared_memory(pm)
+
         nvidia.passes.ttgpuir.add_to_llvmir(pm, capability)
+        
         nvidia.passes.ttnvgpuir.add_nvgpu_to_llvm(pm)
         passes.convert.add_arith_to_llvmir(pm)
         passes.common.add_canonicalizer(pm)

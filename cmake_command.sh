@@ -1,0 +1,14 @@
+cmake -GNinja -S . -B build-debug \
+  -DTRITON_BUILD_PYTHON_MODULE=OFF \
+  -DTRITON_CODEGEN_BACKENDS="amd;nvidia" \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DLLVM_INCLUDE_DIRS=/home/jcm/.triton/llvm/llvm-10dc3a8e-ubuntu-x64/include \
+  -DLLVM_LIBRARY_DIR=/home/jcm/.triton/llvm/llvm-10dc3a8e-ubuntu-x64/lib/ \
+  -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+  -DCMAKE_LINKER=lld \
+  -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld \
+  -DCMAKE_MODULE_LINKER_FLAGS=-fuse-ld=lld \
+  -DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=lld \
+  -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+  -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON

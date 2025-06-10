@@ -3,6 +3,7 @@
 
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "triton/Conversion/MLIRTypes.h"
 #include "triton/Dialect/TritonGPU/IR/Types.h"
 
@@ -21,6 +22,15 @@ public:
   Type convertTritonTensorType(RankedTensorType type);
   Type convertMemDescType(MemDescType type);
   Type convertAsyncToken(triton::gpu::AsyncTokenType type);
+};
+
+
+class TritonGPULLVMToX86TypeConverter : public LLVMTypeConverter {
+public:
+  using TypeConverter::convertType;
+
+  TritonGPULLVMToX86TypeConverter(MLIRContext *ctx, LowerToLLVMOptions &option,
+                               const DataLayoutAnalysis *analysis = nullptr);
 };
 
 #endif

@@ -200,6 +200,39 @@ T getLinearIndex(llvm::ArrayRef<T> multiDimIndex, llvm::ArrayRef<T> shape,
 }
 
 namespace gpu {
+
+// enum of metrics ids
+enum class MetricId : unsigned int {
+  MMAv1 = 0, 
+  MMAv2 = 1,
+  WGMMA = 2,
+};
+
+Value createDummyValue(RewriterBase &rewriter,
+                        Location loc,
+                        Type elemTy,
+                        unsigned numElements,
+                        const LLVMTypeConverter &typeConverter);
+
+void replaceOpWithDummyPacked(ConversionPatternRewriter &rewriter,
+                              const LLVMTypeConverter &typeConverter,
+                              Operation *op,
+                              unsigned totalElems,
+                              Type elemType, Type packedType);
+
+Value ensureMetricsAlloc(StringRef kMarkerName,
+                          unsigned kNumMetricsSlots,
+                          RewriterBase &rewriter,
+                          const LLVMTypeConverter &tc,
+                          LLVM::LLVMFuncOp llvmFunc,
+                          Location loc);
+
+void incrementMetric(RewriterBase &rewriter,
+                      Value metricsAlloca,
+                      Location loc,
+                      unsigned slotIdx,    // which slot to bump
+                      uint32_t amount);
+
 Type getFunctionType(Type resultType, ValueRange operands);
 
 LLVM::LLVMFuncOp appendOrGetExternFuncOp(ConversionPatternRewriter &rewriter,

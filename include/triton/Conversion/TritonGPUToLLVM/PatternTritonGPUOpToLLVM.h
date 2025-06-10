@@ -27,6 +27,10 @@ constexpr int patternBenefitPrioritizeOverLLVMConversions = 10;
 constexpr int patternBenefitClampOptimizedPattern = 20;
 constexpr int patternBenefitConvertLayoutOptimizedPattern = 20;
 
+void populateStripGPUAndSetX86(LLVMTypeConverter &typeConverter,
+                                   RewritePatternSet &patterns,
+                                   const TargetInfoBase &targetInfo);
+
 void populateElementwiseOpToLLVMPatterns(
     LLVMTypeConverter &typeConverter, RewritePatternSet &patterns,
     ModuleAxisInfoAnalysis &axisInfoAnalysis, const TargetInfoBase &targetInfo,

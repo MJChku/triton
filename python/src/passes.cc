@@ -65,6 +65,8 @@ void init_triton_passes_ttgpuir(py::module &&m) {
                      createAllocateSharedMemoryPass);
   ADD_PASS_WRAPPER_0("add_combine_tensor_select_and_if",
                      createTritonGPUCombineTensorSelectAndIf);
+
+  ADD_PASS_WRAPPER_0("add_emit_thread_iters", createTritonGPUEmitThreadIteration);
 }
 
 void init_triton_passes_convert(py::module &&m) {

@@ -16,6 +16,7 @@ add_triton_library(TritonGPUTransforms
   RemoveLayoutConversions.cpp
   ReorderInstructions.cpp
   Utility.cpp
+  EmitThreadIteration.cpp
 
   DEPENDS
   TritonGPUTransformsIncGen

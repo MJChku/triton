@@ -4,6 +4,7 @@ add_triton_library(TritonAnalysis
   Membar.cpp
   Alias.cpp
   Utility.cpp
+  # EmitThreadIterationPass.cpp
 
   DEPENDS
   TritonTableGen

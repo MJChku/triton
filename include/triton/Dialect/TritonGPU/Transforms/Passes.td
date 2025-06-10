@@ -145,4 +145,14 @@ def TritonGPUCombineTensorSelectAndIf: Pass<"tritongpu-combine-tensor-select-and
                            "mlir::triton::TritonDialect"];
 }
 
+def TritonGPUEmitThreadIteration : Pass<"emit-thread-iteration", "mlir::ModuleOp"> {
+  let summary = "Emit C program with per-thread iteration counts for GPU kernels";
+  let description = [{
+    Walks TritonGPU functions and emits a C file with iteration count logic for each thread/kernel.
+  }];
+  let dependentDialects = ["mlir::triton::gpu::TritonGPUDialect",
+                           "mlir::triton::TritonDialect",
+                           "mlir::func::FuncDialect"];
+}
+
 #endif
