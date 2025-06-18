@@ -104,6 +104,8 @@ public:
             || strRef.find("st.shared") != std::string::npos
             || strRef.find("ld.shared") != std::string::npos
             || strRef.find("ctaid.") != std::string::npos
+            || strRef.find("cp.") != std::string::npos
+            || strRef.find("div.full.f32") != std::string::npos
           ){
           return false;
         }
@@ -315,13 +317,6 @@ private:
       auto i32Ty = IntegerType::get(ctx, 32);
       auto fnTy = LLVM::LLVMFunctionType::get(i32Ty, /*params=*/{}, /*isVarArg=*/false);
 
-      if (!module.lookupSymbol<LLVM::LLVMFuncOp>("nvvm_tid_x")) {
-        OpBuilder builder(&getContext());
-        builder.setInsertionPointToStart(module.getBody());
-        auto stub = builder.create<LLVM::LLVMFuncOp>(loc, "nvvm_tid_x", fnTy);
-        stub.setLinkage(LLVM::Linkage::External);
-      }
-
       if (!module.lookupSymbol<LLVM::LLVMFuncOp>("nvgpu_cluster_id")) {
         OpBuilder builder(&getContext());
         builder.setInsertionPointToStart(module.getBody());
@@ -341,6 +336,13 @@ private:
         stub.setLinkage(LLVM::Linkage::External);
       }
 
+      if (!module.lookupSymbol<LLVM::LLVMFuncOp>("nvvm_tid")) {
+        OpBuilder builder(&getContext());
+        builder.setInsertionPointToStart(module.getBody());
+        auto stub = builder.create<LLVM::LLVMFuncOp>(loc, "nvvm_tid", fnTy);
+        stub.setLinkage(LLVM::Linkage::External);
+      }
+
     }
 
     {
@@ -353,16 +355,26 @@ private:
         stub.setLinkage(LLVM::Linkage::External);
       }
     }
-
     {
       auto i64Ty = IntegerType::get(ctx, 64);
       auto ptrTy = LLVM::LLVMPointerType::get(ctx, /*addrSpace=*/0);
-      auto fnTy = LLVM::LLVMFunctionType::get(ptrTy, /*params=*/{i64Ty}, /*isVarArg=*/false);
+      auto fnTy = LLVM::LLVMFunctionType::get(ptrTy, /*params=*/{i64Ty, ptrTy}, /*isVarArg=*/false);
       
       if (!module.lookupSymbol<LLVM::LLVMFuncOp>("metrics_alloca")) {
         OpBuilder builder(&getContext());
         builder.setInsertionPointToStart(module.getBody());
         auto stub = builder.create<LLVM::LLVMFuncOp>(loc, "metrics_alloca", fnTy);
+        stub.setLinkage(LLVM::Linkage::External);
+      }
+    }
+    {
+      auto i64Ty = IntegerType::get(ctx, 64);
+      auto fnTy = LLVM::LLVMFunctionType::get(i64Ty, /*params=*/{}, /*isVarArg=*/false);
+      
+      if (!module.lookupSymbol<LLVM::LLVMFuncOp>("metrics_dummy")) {
+        OpBuilder builder(&getContext());
+        builder.setInsertionPointToStart(module.getBody());
+        auto stub = builder.create<LLVM::LLVMFuncOp>(loc, "metrics_dummy", fnTy);
         stub.setLinkage(LLVM::Linkage::External);
       }
     }
@@ -399,11 +411,17 @@ private:
       }
 
       if (auto glob = dyn_cast<LLVM::GlobalOp>(op)) {
-        llvm::errs() << "Converting global: " << glob.getName() << "\n";
-        glob.setAddrSpace(0);
+        if(glob.getAddrSpace() != 0){
+          llvm::errs() << "Converting global: " << glob.getName() << "\n";
+          glob.setAddrSpace(0);
+        }
       }
 
     });
+  }
+
+  void insertBranchAssertions(){
+
   }
 
 // mjc

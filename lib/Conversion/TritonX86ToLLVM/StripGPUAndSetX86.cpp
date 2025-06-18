@@ -33,6 +33,7 @@ static bool matchTritonAttr(StringRef name) {
   // Match any attribute that starts with "triton_gpu." or "nvvm."
   return  (
           name.rfind( "triton.") != StringRef::npos||
+           name.rfind( "triton.metrics") != StringRef::npos||
           name.rfind( "triton_gpu.") != StringRef::npos ||
           name.rfind("nvvm.") != StringRef::npos || 
           name.rfind("tt.") != StringRef::npos);
@@ -181,19 +182,73 @@ struct ConvertReadTidX : public ConversionPattern{
   LogicalResult
   matchAndRewrite(Operation *op, ArrayRef<Value> /*operands*/,
                   ConversionPatternRewriter &rewriter) const override {
-     // Create a call to get_tid_x(): i32 = call @get_tid_x()
-    auto i32Ty = rewriter.getI32Type();
-    auto calleeName = rewriter.getStringAttr("nvvm_tid_x");
+    auto loc = op->getLoc();
+    int axis = 0;
+    auto i32Ty = rewriter.getIntegerType(32);
+    Value axisConst = rewriter.create<LLVM::ConstantOp>(
+        loc, i32Ty, rewriter.getIntegerAttr(i32Ty, axis));
+
+    auto calleeName = rewriter.getStringAttr("nvvm_tid");
     auto call = rewriter.create<LLVM::CallOp>(
     op->getLoc(),
     /*resultTypes=*/TypeRange{i32Ty},
     /*callee=*/calleeName,
-    /*args=*/ValueRange{});
+    /*args=*/ValueRange{axisConst});
     rewriter.replaceOp(op, call.getResult());
     return success();
   }
 };
 
+
+struct ConvertReadTidY : public ConversionPattern{
+  explicit ConvertReadTidY(MLIRContext *ctx)
+      : ConversionPattern(NVVM::ThreadIdYOp::getOperationName(),
+                          /*benefit=*/1, ctx) {}
+
+  LogicalResult
+  matchAndRewrite(Operation *op, ArrayRef<Value> /*operands*/,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto loc = op->getLoc();
+    int axis = 1;
+    auto i32Ty = rewriter.getIntegerType(32);
+    Value axisConst = rewriter.create<LLVM::ConstantOp>(
+        loc, i32Ty, rewriter.getIntegerAttr(i32Ty, axis));
+
+    auto calleeName = rewriter.getStringAttr("nvvm_tid");
+    auto call = rewriter.create<LLVM::CallOp>(
+    op->getLoc(),
+    /*resultTypes=*/TypeRange{i32Ty},
+    /*callee=*/calleeName,
+    /*args=*/ValueRange{axisConst});
+    rewriter.replaceOp(op, call.getResult());
+    return success();
+  }
+};
+
+struct ConvertReadTidZ : public ConversionPattern{
+  explicit ConvertReadTidZ(MLIRContext *ctx)
+      : ConversionPattern(NVVM::ThreadIdZOp::getOperationName(),
+                          /*benefit=*/1, ctx) {}
+
+  LogicalResult
+  matchAndRewrite(Operation *op, ArrayRef<Value> /*operands*/,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto loc = op->getLoc();
+    int axis = 2;
+    auto i32Ty = rewriter.getIntegerType(32);
+    Value axisConst = rewriter.create<LLVM::ConstantOp>(
+        loc, i32Ty, rewriter.getIntegerAttr(i32Ty, axis));
+
+    auto calleeName = rewriter.getStringAttr("nvvm_tid");
+    auto call = rewriter.create<LLVM::CallOp>(
+    op->getLoc(),
+    /*resultTypes=*/TypeRange{i32Ty},
+    /*callee=*/calleeName,
+    /*args=*/ValueRange{axisConst});
+    rewriter.replaceOp(op, call.getResult());
+    return success();
+  }
+};
 
 struct ConvertBarrier0Op: public ConversionPattern{
   explicit ConvertBarrier0Op(MLIRContext *ctx)
@@ -233,104 +288,6 @@ struct ConvertClusterId : public ConversionPattern{
   }
 };
 
-/// Match any LLVM::InlineAsmOp whose asm string contains "ld.global".
-// struct ConvertGlobalInlineLoad : public ConversionPattern {
-//   explicit ConvertGlobalInlineLoad(MLIRContext *ctx)
-//       : ConversionPattern(LLVM::InlineAsmOp::getOperationName(), 1, ctx) {}
-
-//   LogicalResult matchAndRewrite(Operation *op, ArrayRef<Value> operands,
-//                                 ConversionPatternRewriter &rewriter) const override {
-//     auto asmOp = cast<LLVM::InlineAsmOp>(op);
-
-//     if (asmOp.getAsmString().str().find("ld.global") == std::string::npos){
-//       return failure();
-//     }
-//     // Expected signature: (ptr, i1) -> T   (T is i8/i16/i32/i64)
-//     if (asmOp.getNumOperands() != 2 || asmOp.getNumResults() != 1)
-//       return failure();
-//     Value  ptr  = asmOp.getOperand(0);
-//     Value  pred = asmOp.getOperand(1);
-//     Type   elemTy = asmOp.getResultTypes().front();
-
-//     // 1) Plain LLVM load  (unconditional)
-//     auto loaded = rewriter.create<LLVM::LoadOp>(op->getLoc(), elemTy, ptr);
-
-//     // 2) Zero literal of the same element type
-//     Value zero;
-//     if (elemTy.isInteger(8) || elemTy.isInteger(16) ||
-//         elemTy.isInteger(32) || elemTy.isInteger(64))
-//       zero = rewriter.create<LLVM::ConstantOp>(
-//           op->getLoc(), elemTy, rewriter.getIntegerAttr(elemTy, 0));
-//     else
-//       return failure();   // unsupported element size
-
-//     // 3) `select pred, loaded, zero`
-//     auto selected = rewriter.create<LLVM::SelectOp>(
-//         op->getLoc(), elemTy, pred, loaded, zero);
-
-//     // Replace the asm op with the selected value
-//     rewriter.replaceOp(op, selected.getResult());
-//     return success();
-//   }
-// };
-
-/// Replaces scalar `ld.global` inline-asm with LLVM load (and select).
-///
-/// Accepts either   (ptr)       -> i8/i16/i32/i64   (un-masked)
-///            or    (ptr, i1)   -> i8/i16/i32/i64   (masked)
-///
-/// After this pattern runs there are *no* llvm.inline_asm ops of that shape.
-// struct ConvertGlobalInline : public mlir::ConversionPattern {
-//   explicit ConvertGlobalInline(MLIRContext *ctx)
-//       : ConversionPattern(LLVM::InlineAsmOp::getOperationName(),
-//                           /*benefit=*/1, ctx) {}
-
-//   LogicalResult matchAndRewrite(Operation *op, ArrayRef<Value> /*operands*/,
-//                                 ConversionPatternRewriter &rewriter) const override {
-//     auto asmOp = dyn_cast<LLVM::InlineAsmOp>(op);
-//     if (!asmOp)
-//       return failure();
-
-//     // one scalar integer result
-//     if (asmOp.getNumResults() != 1)
-//       return failure();
-//     Type elemTy = asmOp.getResultTypes().front();
-//     if (!elemTy.isIntOrIndex())
-//       return failure();
-
-//     // (ptr)  or  (ptr , i1)
-//     if (asmOp.getNumOperands() != 1 && asmOp.getNumOperands() != 2)
-//       return failure();
-//     Value ptr  = asmOp.getOperand(0);
-//     if (!mlir::isa<LLVM::LLVMPointerType>(ptr.getType()))
-//       return failure();
-//     bool masked = (asmOp.getNumOperands() == 2);
-//     Value pred  = masked ? asmOp.getOperand(1) : Value();
-
-//     Location loc = op->getLoc();
-
-//     auto loaded = rewriter.create<LLVM::LoadOp>(loc, elemTy, ptr);
-
-//     Value replacement = loaded.getResult();
-//     if (masked) {
-//       auto zero = rewriter.create<LLVM::ConstantOp>(
-//           loc, elemTy,
-//           rewriter.getIntegerAttr(mlir::cast<IntegerType>(elemTy), 0));
-
-//       // select %pred, %ld, 0
-//       replacement = rewriter.create<LLVM::SelectOp>(
-//           loc, elemTy, pred, loaded, zero);
-//     }
-
-//     rewriter.replaceOp(op, replacement);
-//     return success();
-//   }
-// };
-//===----------------------------------------------------------------------===//
-//  Convert scalar ld.global / st.global inline-asm
-//  after Triton lowering (masked + unmasked)
-//===----------------------------------------------------------------------===//
-
 struct ConvertGlobalInline : public ConversionPattern{
   explicit ConvertGlobalInline(MLIRContext *ctx)
       : ConversionPattern(LLVM::InlineAsmOp::getOperationName(),
@@ -346,25 +303,174 @@ struct ConvertGlobalInline : public ConversionPattern{
         && strRef.find("st.global") == std::string::npos
         && strRef.find("st.shared") == std::string::npos
         && strRef.find("ld.shared") == std::string::npos
-        && strRef.find("ctaid.") == std::string::npos
+        && strRef.find("ctaid.") == std::string::npos 
+        && strRef.find("cp.") == std::string::npos
+        && strRef.find("div.full.f32") == std::string::npos
+        && strRef.find("prmt.b32") == std::string::npos
       ){
       return failure(); 
     }
 
-    /* ---------- fast detect load vs store --------------------------------- */
-    // Triton keeps the original constraint string
-    //   LOAD  : "=c,l,b"   (one output “=c”, two inputs “l,b”)
-    //   STORE : "r,l,b"    (zero outputs, three inputs)
     auto asmStr = asmOp.getAsmString();
     bool isLoad  = asmStr.contains("ld.global");
     bool isStore = asmStr.contains("st.global");
     bool isCTAId = asmStr.contains("ctaid.");
-    if (!isLoad && !isStore && !isCTAId) return failure();
+    bool isCopy = asmStr.contains("cp.");
+    bool isDivision = asmStr.contains("div.full.f32");
+    bool isPrmt = asmStr.contains("prmt.b32");
 
     Location loc = op->getLoc();
-
-    /* ---------- scalar GLOBAL LOAD ---------------------------------------- */
+    
+    /* ---------- PRMT.B32 BYTE PERMUTE ---------------------------------------- */
+    if (isPrmt) {
+      llvm::errs() << "Converting PTX prmt.b32: " << asmStr << "\n";
+      
+      // prmt.b32 typically takes 1 input (i32) and produces 2 outputs (vector<2xf16> each)
+      // Pattern: (i32) -> !llvm.struct<(vector<2xf16>, vector<2xf16>)>
+      if (asmOp.getNumOperands() != 1) return failure();
+      if (asmOp.getNumResults() != 1) return failure();
+      
+      Value input = asmOp.getOperand(0);  // %11422 in your example
+      Type resultType = asmOp.getResult(0).getType();
+      
+      // Verify it's the expected struct type
+      auto structType = dyn_cast<LLVM::LLVMStructType>(resultType);
+      if (!structType || structType.getBody().size() != 2) return failure();
+      
+      // For x86, we'll create dummy half-precision vectors
+      // Since prmt.b32 is doing byte permutation to create f16 vectors,
+      // we'll just create zero vectors as placeholders
+      
+      auto f16Ty = rewriter.getF16Type();
+      auto vec2f16Ty = LLVM::getFixedVectorType(f16Ty, 2);
+      
+      // Create zero vectors for both outputs
+      Value zeroF16 = rewriter.create<LLVM::ConstantOp>(
+          loc, f16Ty, rewriter.getFloatAttr(f16Ty, 0.0));
+      
+      Value zeroVec1 = rewriter.create<LLVM::UndefOp>(loc, vec2f16Ty);
+      zeroVec1 = rewriter.create<LLVM::InsertElementOp>(
+          loc, zeroVec1, zeroF16, rewriter.create<LLVM::ConstantOp>(
+              loc, rewriter.getI32Type(), rewriter.getI32IntegerAttr(0)));
+      zeroVec1 = rewriter.create<LLVM::InsertElementOp>(
+          loc, zeroVec1, zeroF16, rewriter.create<LLVM::ConstantOp>(
+              loc, rewriter.getI32Type(), rewriter.getI32IntegerAttr(1)));
+      
+      Value zeroVec2 = rewriter.create<LLVM::UndefOp>(loc, vec2f16Ty);
+      zeroVec2 = rewriter.create<LLVM::InsertElementOp>(
+          loc, zeroVec2, zeroF16, rewriter.create<LLVM::ConstantOp>(
+              loc, rewriter.getI32Type(), rewriter.getI32IntegerAttr(0)));
+      zeroVec2 = rewriter.create<LLVM::InsertElementOp>(
+          loc, zeroVec2, zeroF16, rewriter.create<LLVM::ConstantOp>(
+              loc, rewriter.getI32Type(), rewriter.getI32IntegerAttr(1)));
+      
+      // Pack into the result struct
+      Value result = rewriter.create<LLVM::UndefOp>(loc, structType);
+      result = rewriter.create<LLVM::InsertValueOp>(
+          loc, result, zeroVec1, rewriter.getDenseI64ArrayAttr({0}));
+      result = rewriter.create<LLVM::InsertValueOp>(
+          loc, result, zeroVec2, rewriter.getDenseI64ArrayAttr({1}));
+      
+      rewriter.replaceOp(op, result);
+      return success();
+    }
+    
+    if (isDivision) {
+      llvm::errs() << "Converting PTX division: " << asmStr << "\n";
+      
+      // Expected: (f32, f32) -> f32 division
+      if (asmOp.getNumOperands() != 2) return failure();
+      if (asmOp.getNumResults() != 1) return failure();
+      
+      Value dividend = asmOp.getOperand(0);  // $1 
+      Value divisor = asmOp.getOperand(1);   // $2 
+      Type resultTy = asmOp.getResult(0).getType();
+      
+      if (!resultTy.isF32()) return failure();
+      
+      // Replace with regular LLVM division
+      Value result = rewriter.create<LLVM::FDivOp>(loc, resultTy, dividend, divisor);
+      rewriter.replaceOp(op, result);
+      return success();
+    }
+    if (isCopy) {
+      llvm::errs() << "Converting cp.* instruction: " << asmStr << "\n";
+      
+      // These are async memory copy operations - for x86, just ignore them
+      // Since they return void, create a void result
+      Type resTy = asmOp.getResult(0).getType();
+      if (!mlir::isa<LLVM::LLVMVoidType>(resTy)) {
+        return failure();
+      }
+      
+      // Option 1: Replace with void undef (essentially a no-op)
+      auto voidTy = LLVM::LLVMVoidType::get(rewriter.getContext());
+      rewriter.replaceOpWithNewOp<LLVM::UndefOp>(op, voidTy);
+      return success();
+    }
+   
     if (isLoad) {
+
+      bool isVectorLoad = asmStr.contains("ld.global.v4") || asmStr.contains("ld.global.v2");
+      if (isVectorLoad) {
+        llvm::errs() << "Converting vector load: " << asmStr << "\n";
+        
+        // Expected: ptr, predicate -> struct<(i32, i32, i32, i32)>
+        if (asmOp.getNumOperands() != 2) return failure();
+        if (asmOp.getNumResults() != 1) return failure();
+        
+        Value ptr = asmOp.getOperand(0);
+        Value pred = asmOp.getOperand(1);
+        
+        auto resultType = asmOp.getResult(0).getType();
+        auto structType = dyn_cast<LLVM::LLVMStructType>(resultType);
+        if (!structType) return failure();
+        
+        // Get the individual element types from the struct
+        auto elementTypes = structType.getBody();
+        if (elementTypes.size() != 4 && elementTypes.size() != 2 ) return failure(); // Expecting v4 or v2
+        
+        // Create individual loads for each element
+        SmallVector<Value> loadedValues;
+        auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext(), 1); // addrspace 1
+        
+        for (size_t i = 0; i < elementTypes.size(); ++i) {
+          // Calculate offset: ptr + i * sizeof(element)
+          Value offset = rewriter.create<LLVM::ConstantOp>(
+              loc, rewriter.getI64Type(), rewriter.getI64IntegerAttr(i * 4)); // 4 bytes per i32
+          
+          Value elemPtr = rewriter.create<LLVM::GEPOp>(
+              loc, ptrType, rewriter.getI8Type(), ptr, ValueRange{offset});
+          
+          // Cast to the correct pointer type
+          Value typedPtr = rewriter.create<LLVM::BitcastOp>(
+              loc, LLVM::LLVMPointerType::get(rewriter.getContext(), 1), elemPtr);
+          
+          // Load the element
+          Value loadedElem = rewriter.create<LLVM::LoadOp>(loc, elementTypes[i], typedPtr);
+          
+          // Apply predicate if needed
+          if (pred) {
+            Value zero = rewriter.create<LLVM::ConstantOp>(
+                loc, elementTypes[i],
+                rewriter.getIntegerAttr(cast<IntegerType>(elementTypes[i]), 0));
+            loadedElem = rewriter.create<LLVM::SelectOp>(loc, elementTypes[i], pred, loadedElem, zero);
+          }
+          
+          loadedValues.push_back(loadedElem);
+        }
+        
+        // Pack into struct
+        Value result = rewriter.create<LLVM::UndefOp>(loc, structType);
+        for (size_t i = 0; i < loadedValues.size(); ++i) {
+          result = rewriter.create<LLVM::InsertValueOp>(
+              loc, result, loadedValues[i], rewriter.getDenseI64ArrayAttr({static_cast<int64_t>(i)}));
+        }
+        
+        rewriter.replaceOp(op, result);
+        return success();
+      }
+
       // ptr [, pred]  -> iN
       if (asmOp.getNumOperands() != 1 && asmOp.getNumOperands() != 2)
         return failure();
@@ -389,8 +495,69 @@ struct ConvertGlobalInline : public ConversionPattern{
       rewriter.replaceOp(op, repl);
       return success();
     }
-  
+
+    /* ---------- GLOBAL STORE ---------------------------------------- */
     if(isStore){
+      bool isVectorStoreV4 = asmStr.contains("st.global.v4");
+      bool isVectorStoreV2 = asmStr.contains("st.global.v2");
+      
+      if (isVectorStoreV2) {
+        llvm::errs() << "Converting vector store: " << asmStr << " not supported \n";
+        return failure();
+      }
+
+      if (isVectorStoreV4) {
+        llvm::errs() << "Converting vector store: " << asmStr << "\n";
+        
+        // Expected: val0, val1, val2, val3, ptr, predicate -> void
+        if (asmOp.getNumOperands() != 6) return failure(); // 4 values + ptr + predicate
+        if (asmOp.getNumResults() != 1) return failure();
+        
+        Type resTy = asmOp.getResult(0).getType();
+        if (!mlir::isa<LLVM::LLVMVoidType>(resTy))
+          return failure();
+        
+        // Extract operands
+        Value val0 = asmOp.getOperand(0);
+        Value val1 = asmOp.getOperand(1);
+        Value val2 = asmOp.getOperand(2);
+        Value val3 = asmOp.getOperand(3);
+        Value ptr = asmOp.getOperand(4);
+        Value pred = asmOp.getOperand(5);
+        
+        SmallVector<Value> values = {val0, val1, val2, val3};
+        auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext(), 1); // addrspace 1
+        
+        // Store each element individually
+        for (size_t i = 0; i < values.size(); ++i) {
+          // Calculate offset: ptr + i * sizeof(element)
+          Value offset = rewriter.create<LLVM::ConstantOp>(
+              loc, rewriter.getI64Type(), rewriter.getI64IntegerAttr(i * 4)); // 4 bytes per i32
+          
+          Value elemPtr = rewriter.create<LLVM::GEPOp>(
+              loc, ptrType, rewriter.getI8Type(), ptr, ValueRange{offset});
+          
+          // Cast to the correct pointer type
+          Value typedPtr = rewriter.create<LLVM::BitcastOp>(
+              loc, LLVM::LLVMPointerType::get(rewriter.getContext(), 1), elemPtr);
+          
+          // Apply predicate to the value if needed
+          Value dataToStore = values[i];
+          if (pred) {
+            Value old = rewriter.create<LLVM::LoadOp>(loc, values[i].getType(), typedPtr);
+            dataToStore = rewriter.create<LLVM::SelectOp>(loc, values[i].getType(), pred, values[i], old);
+          }
+          
+          // Store the element
+          rewriter.create<LLVM::StoreOp>(loc, dataToStore, typedPtr);
+        }
+        
+        rewriter.eraseOp(op);
+        // auto voidTy = LLVM::LLVMVoidType::get(rewriter.getContext());
+        // rewriter.replaceOpWithNewOp<LLVM::UndefOp>(op, voidTy);
+        return success();
+      }
+
       // llvm::errs() << "Converting st.global : " << asmOp.getAsmString() << " (" << asmOp.getNumOperands() << ") -> #of results (" << asmOp.getNumResults() << "\n";
       if(asmOp.getNumResults() != 1) {
         return failure();
@@ -398,7 +565,7 @@ struct ConvertGlobalInline : public ConversionPattern{
       Type resTy = asmOp.getResult(0).getType();
       if (!mlir::isa<LLVM::LLVMVoidType>(resTy))
         return failure();
-      // (val, ptr [, pred])  →  void
+      
       if (asmOp.getNumOperands() != 2 &&
           asmOp.getNumOperands() != 3){
         return failure();
@@ -410,7 +577,6 @@ struct ConvertGlobalInline : public ConversionPattern{
 
       Value data = val;
       if (pred) {
-        // masked store: keep old value where predicate is false
         Value old = rewriter.create<LLVM::LoadOp>(loc, val.getType(), ptr);
         data = rewriter.create<LLVM::SelectOp>(loc, val.getType(), pred, val, old);
       }
@@ -420,8 +586,8 @@ struct ConvertGlobalInline : public ConversionPattern{
       return success();
     }
 
+    /* ---------- CTA ID ---------------------------------------- */
     if (isCTAId){
-
       int axis = -1;
       bool isCtaIdX = asmStr.contains("%ctaid.x");
       bool isCtaIdY = asmStr.contains("%ctaid.y");
@@ -430,13 +596,10 @@ struct ConvertGlobalInline : public ConversionPattern{
       else if(isCtaIdY) axis = 1;
       else if(isCtaIdZ) axis = 2;
       
-      llvm::errs() << "Converting ctaid: " << asmOp.getAsmString() << " " << asmOp.getNumOperands() << " -> #of results (" << asmOp.getNumResults() << "\n";
-      
-      // Expect no operands, one i32 result
-      if (asmOp.getNumOperands() != 0)          return failure();
-      if (asmOp.getNumResults()  != 1)          return failure();
+      if (asmOp.getNumOperands() != 0) return failure();
+      if (asmOp.getNumResults()  != 1) return failure();
       Type resTy = asmOp.getResult(0).getType();
-      if (!resTy.isSignlessInteger(32))   return failure();
+      if (!resTy.isSignlessInteger(32)) return failure();
 
       auto i32Ty = rewriter.getIntegerType(32);
       Value axisConst = rewriter.create<LLVM::ConstantOp>(
@@ -449,7 +612,6 @@ struct ConvertGlobalInline : public ConversionPattern{
           /*args=*/ValueRange{axisConst});
 
       return success();
-      
     }
 
     return failure();
@@ -469,12 +631,15 @@ struct ConvertMetricsAlloca : public ConversionPattern {
     if (!allocaOp) 
       return failure();
 
+    
     // Check if it has any triton.* attributes
+    std::string attrName = "unknown";
     bool hasTritonAttr = false;
     for (NamedAttribute na : allocaOp->getAttrs()) {
       StringRef name = na.getName().getValue();
       if (matchTritonAttr(name)) {
         hasTritonAttr = true;
+        attrName = name.str();
         break;
       }
     }
@@ -484,6 +649,11 @@ struct ConvertMetricsAlloca : public ConversionPattern {
 
     Location loc = op->getLoc();
     
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    if (!module) {
+      return failure();
+    }
+
     // Get the allocation size in bytes
     Value arraySize = allocaOp.getArraySize();
     Type elemType = allocaOp.getElemType();
@@ -514,14 +684,42 @@ struct ConvertMetricsAlloca : public ConversionPattern {
 
     // totalSize = arraySize * elemSizeBytes
     Value totalSize = rewriter.create<LLVM::MulOp>(loc, i64Ty, arraySizeI64, elemSizeBytes);
-
-    // Call metrics_alloca(size) -> ptr
+    
+    static int counter = 0;
+    std::string symbolName = "metrics_name_" + std::to_string(counter++); 
+    auto arrayTy = LLVM::LLVMArrayType::get(rewriter.getI8Type(), attrName.length() + 1);
+    
+        auto savedInsertionPoint = rewriter.saveInsertionPoint();
+    
+    // Set insertion point to module level
+    rewriter.setInsertionPointToStart(module.getBody());
+    
+    auto nameConstant = rewriter.create<LLVM::GlobalOp>(
+        loc, 
+        arrayTy,
+        /*isConstant=*/true,
+        LLVM::Linkage::Private,
+        symbolName,
+        rewriter.getStringAttr(attrName + '\0'));
+    
+    // Restore insertion point
+    rewriter.restoreInsertionPoint(savedInsertionPoint);
+    
+    // Create string constant for the attribute name
+    auto stringTy = LLVM::LLVMPointerType::get(rewriter.getContext(), /*addrSpace=*/0);
+    
+    auto namePtr = rewriter.create<LLVM::AddressOfOp>(loc, stringTy, nameConstant.getSymName());
+    auto nameGEP = rewriter.create<LLVM::GEPOp>(
+    loc, stringTy, arrayTy, namePtr,  // Use arrayTy instead of rewriter.getI8Type()
+    ValueRange{rewriter.create<LLVM::ConstantOp>(loc, rewriter.getI64Type(), rewriter.getIntegerAttr(rewriter.getI64Type(), 0)),
+               rewriter.create<LLVM::ConstantOp>(loc, rewriter.getI64Type(), rewriter.getIntegerAttr(rewriter.getI64Type(), 0))});
+    // Call metrics_alloca(size, name) -> ptr
     auto ptrTy = LLVM::LLVMPointerType::get(rewriter.getContext(), /*addrSpace=*/0);
     auto call = rewriter.create<LLVM::CallOp>(
         loc,
         /*resultTypes=*/TypeRange{ptrTy},
         /*callee=*/rewriter.getStringAttr("metrics_alloca"),
-        /*args=*/ValueRange{totalSize});
+        /*args=*/ValueRange{totalSize, nameGEP});
 
     rewriter.replaceOp(op, call.getResult());
     return success();
@@ -543,6 +741,8 @@ void mlir::triton::populateStripGPUAndSetX86(
   patterns.add<StripGPUAttrsInModule>(ctx);
   patterns.add<StripGPUAttrsInFunc>(ctx);
   patterns.add<ConvertReadTidX>(ctx);
+  patterns.add<ConvertReadTidY>(ctx);
+  patterns.add<ConvertReadTidZ>(ctx);
   patterns.add<ConvertClusterId>(ctx);
   patterns.add<ConvertBarrier0Op>(ctx);
   patterns.add<ConvertGlobalInline>(ctx);

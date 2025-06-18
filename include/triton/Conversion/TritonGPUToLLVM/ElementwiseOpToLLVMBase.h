@@ -10,6 +10,7 @@
 
 using namespace mlir;
 using namespace mlir::triton;
+using ::mlir::triton::gpu::ensureMetricsAlloc;
 
 namespace mlir::triton {
 
@@ -177,6 +178,13 @@ public:
   LogicalResult
   matchAndRewrite(SourceOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+
+    auto &tc = *this->getTypeConverter();
+    metricsAlloca = ensureMetricsAlloc("triton.metrics.elementwise_op", 10, rewriter,
+                             tc,
+                             op->template getParentOfType<LLVM::LLVMFuncOp>(),
+                             op->getLoc());
+
     auto resultTy = op.getType();
     Location loc = op->getLoc();
     // element type
@@ -222,8 +230,13 @@ public:
     return success();
   }
 
+public:
+  mutable Value metricsAlloca;
+
+
 protected:
   ModuleAxisInfoAnalysis &axisAnalysisPass;
+
 };
 
 } // namespace gpu

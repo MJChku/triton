@@ -86,6 +86,14 @@ configs = [
     for w in [4, 8]\
 ]
 
+configs = [
+    triton.Config({'BLOCK_M': BM, 'BLOCK_N': BN}, num_stages=s, num_warps=w) \
+    for BM in [64]\
+    for BN in [64]\
+    for s in ([1] if is_hip() else [3])\
+    for w in [4]\
+]
+
 
 def keep(conf):
     BLOCK_M = conf.kwargs["BLOCK_M"]
@@ -578,6 +586,7 @@ for mode in ["fwd", "bwd"]:
             triton.testing.Benchmark(
                 x_names=["N_CTX"],
                 x_vals=[2**i for i in range(10, 15)],
+                # x_vals=[2**10],
                 line_arg="provider",
                 line_vals=["triton-fp16"] + (["triton-fp8"] if TORCH_HAS_FP8 else []) +
                 (["flash"] if HAS_FLASH else []),
@@ -599,8 +608,8 @@ for mode in ["fwd", "bwd"]:
 @triton.testing.perf_report(configs)
 def bench_flash_attention(BATCH, H, N_CTX, HEAD_DIM, causal, mode, provider, device="cuda"):
     assert mode in ["fwd", "bwd"]
-    warmup = 25
-    rep = 100
+    warmup = 0
+    rep = 1
     dtype = torch.float16
     if "triton" in provider:
         q = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device="cuda", requires_grad=True)

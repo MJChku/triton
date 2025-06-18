@@ -2,11 +2,16 @@
 #include "TargetInfo.h"
 #include "TritonNVIDIAGPUToLLVM/PTXAsmFormat.h"
 #include "Utility.h"
+#include "mlir/Conversion/LLVMCommon/TypeConverter.h"
 #include "mlir/Support/LLVM.h"
 #include "triton/Conversion/TritonGPUToLLVM/ElementwiseOpToLLVMBase.h"
 #include "triton/Conversion/TritonGPUToLLVM/PatternTritonGPUOpToLLVM.h"
+#include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 
 using namespace mlir::triton::gpu;
+using ::mlir::triton::gpu::createDummyValue;
+using ::mlir::triton::gpu::incrementMetric;
+using ::mlir::triton::gpu::ensureMetricsAlloc;
 
 namespace mlir::triton {
 
@@ -241,61 +246,82 @@ typedef std::function<SmallVector<Value>(Location, ConversionPatternRewriter &,
 
 static ConverterT makeConverterFromPtx(const std::string &ptxAsm, Type inType,
                                        Type outType,
+                                       const LLVMTypeConverter* typeConverter,
+                                       Value metricsAlloca,
                                        const int inVecWidthBits = 32,
                                        const int outVecWidthBits = 32) {
 
   ConverterT converter =
-      [ptxAsm, inType, outType, inVecWidthBits,
+      [ptxAsm, inType, outType, 
+       typeConverter, metricsAlloca, 
+       inVecWidthBits,
        outVecWidthBits](Location loc, ConversionPatternRewriter &rewriter,
                         const SmallVector<Value> &v) -> SmallVector<Value> {
     int numElements = v.size();
     assert(numElements == 4 || numElements == 2 && "invalid vector size");
 
-    auto ctx = rewriter.getContext();
-    int inBitwidth = inType.getIntOrFloatBitWidth();
-    int outBitwidth = outType.getIntOrFloatBitWidth();
-    // first, we pack `v` into 32-bit ints
-    int inVecWidth = inVecWidthBits / inBitwidth;
-    auto inVecTy = vec_ty(inType, inVecWidth);
-    SmallVector<Value> inPacked(numElements / inVecWidth, undef(inVecTy));
-    for (size_t i = 0; i < numElements; i++)
-      inPacked[i / inVecWidth] = insert_element(
-          inVecTy, inPacked[i / inVecWidth], v[i], i32_val(i % inVecWidth));
-    for (size_t i = 0; i < inPacked.size(); i++)
-      inPacked[i] = bitcast(inPacked[i], int_ty(inVecWidthBits));
+    // llvm::errs() << "Using ptx conversion: " << ptxAsm << " " << outType<< "\n";
+    // if( ptxAsm == Fp8E4M3Nv_to_Fp16.ptx ||
+    //     ptxAsm == Fp8E4M3Nv_to_Bf16.ptx ||
+    //     ptxAsm == Fp16_to_Fp8E4M3Nv.ptx ||
+    //     ptxAsm == Fp16_to_Fp8E5M2_RTZ.ptx ||  
+    //     ptxAsm == Bf16_to_Fp8E4M3Nv.ptx ||
+    //     ptxAsm == Fp32_to_Fp8E4M3Nv.ptx ||
+    //     ptxAsm == Fp32_to_Fp8E5M2.ptx
+    //   ) {
+    //   llvm::errs() << "Seeing ptx conversion for: " << ptxAsm << "\n";
+    // }
 
-    // then, we run the provided inline PTX
-    int outVecWidth = outVecWidthBits / outBitwidth;
-    int outNums = numElements / outVecWidth;
-    PTXBuilder builder;
-    SmallVector<PTXBuilder::Operand *> operands;
-    auto outConstriant = outVecWidthBits == 16 ? "=h" : "=r";
-    auto inConstraint = inVecWidthBits == 16 ? "h" : "r";
-    for (int i = 0; i < outNums; i++) {
-      operands.push_back(builder.newOperand(outConstriant));
-    }
+    incrementMetric(rewriter, metricsAlloca, loc, 1, 1);
 
-    for (Value inVal : inPacked) {
-      operands.push_back(builder.newOperand(inVal, inConstraint));
-    }
+    // auto ctx = rewriter.getContext();
+    // int inBitwidth = inType.getIntOrFloatBitWidth();
+    // int outBitwidth = outType.getIntOrFloatBitWidth();
+    // // first, we pack `v` into 32-bit ints
+    // int inVecWidth = inVecWidthBits / inBitwidth;
+    // auto inVecTy = vec_ty(inType, inVecWidth);
+    // SmallVector<Value> inPacked(numElements / inVecWidth, undef(inVecTy));
+    // for (size_t i = 0; i < numElements; i++)
+    //   inPacked[i / inVecWidth] = insert_element(
+    //       inVecTy, inPacked[i / inVecWidth], v[i], i32_val(i % inVecWidth));
+    // for (size_t i = 0; i < inPacked.size(); i++)
+    //   inPacked[i] = bitcast(inPacked[i], int_ty(inVecWidthBits));
 
-    auto &ptxOp = *builder.create(ptxAsm);
-    ptxOp(operands, /*onlyAttachMLIRArgs=*/true);
-    auto outVecTy = vec_ty(outType, outVecWidth);
-    SmallVector<Value> outPacked;
-    if (outNums == 1)
-      outPacked.push_back(builder.launch(rewriter, loc, outVecTy, false));
-    else {
-      auto outStructTy = struct_ty(SmallVector<Type>(outNums, outVecTy));
-      auto outStruct = builder.launch(rewriter, loc, outStructTy, false);
-      for (int i = 0; i < outNums; i++)
-        outPacked.push_back(extract_val(outVecTy, outStruct, i));
-    }
+    // // then, we run the provided inline PTX
+    // int outVecWidth = outVecWidthBits / outBitwidth;
+    // int outNums = numElements / outVecWidth;
+    // PTXBuilder builder;
+    // SmallVector<PTXBuilder::Operand *> operands;
+    // auto outConstriant = outVecWidthBits == 16 ? "=h" : "=r";
+    // auto inConstraint = inVecWidthBits == 16 ? "h" : "r";
+    // for (int i = 0; i < outNums; i++) {
+    //   operands.push_back(builder.newOperand(outConstriant));
+    // }
+
+    // for (Value inVal : inPacked) {
+    //   operands.push_back(builder.newOperand(inVal, inConstraint));
+    // }
+
+    // auto &ptxOp = *builder.create(ptxAsm);
+    // ptxOp(operands, /*onlyAttachMLIRArgs=*/true);
+    // auto outVecTy = vec_ty(outType, outVecWidth);
+    // SmallVector<Value> outPacked;
+    // if (outNums == 1)
+    //   outPacked.push_back(builder.launch(rewriter, loc, outVecTy, false));
+    // else {
+    //   auto outStructTy = struct_ty(SmallVector<Type>(outNums, outVecTy));
+    //   auto outStruct = builder.launch(rewriter, loc, outStructTy, false);
+    //   for (int i = 0; i < outNums; i++)
+    //     outPacked.push_back(extract_val(outVecTy, outStruct, i));
+    // }
+
+
     // unpack the output
     SmallVector<Value> ret;
-    for (size_t i = 0; i < numElements; i++)
-      ret.push_back(extract_element(outType, outPacked[i / outVecWidth],
-                                    i32_val(i % outVecWidth)));
+    for (size_t i = 0; i < numElements; i++){
+      ret.push_back(createDummyValue(
+          rewriter, loc, outType, 1, *typeConverter));
+    }
     return ret;
   };
   return converter;
@@ -317,6 +343,7 @@ struct FpToFpOpConversion
   static Value convertBf16ToFp32(Location loc,
                                  ConversionPatternRewriter &rewriter,
                                  const Value &v) {
+
     PTXBuilder builder;
     auto &cvt = *builder.create("cvt.f32.bf16");
     auto res = builder.newOperand("=r");
@@ -327,7 +354,14 @@ struct FpToFpOpConversion
 
   static Value convertFp16ToFp32(Location loc,
                                  ConversionPatternRewriter &rewriter,
+                                 const LLVMTypeConverter& typeConverter,
+                                 Value metricsAlloca,
                                  const Value &v) {
+  
+    incrementMetric(rewriter, metricsAlloca, loc, 0, 1);
+    return createDummyValue(
+          rewriter, loc, f32_ty, 1, typeConverter);
+
     PTXBuilder builder;
     auto &cvt = *builder.create("cvt.f32.f16");
     auto res = builder.newOperand("=r");
@@ -338,29 +372,24 @@ struct FpToFpOpConversion
 
   static Value convertFp32ToBf16(Location loc,
                                  ConversionPatternRewriter &rewriter,
+                                 const LLVMTypeConverter& typeConverter,
+                                 Value metricsAlloca,
                                  const Value &v, const RoundingMode rounding) {
-    PTXBuilder builder;
-    StringRef ptx;
-    switch (rounding) {
-    case RoundingMode::RTNE:
-      ptx = "cvt.rn.bf16.f32";
-      break;
-    case RoundingMode::RTZ:
-      ptx = "cvt.rz.bf16.f32";
-      break;
-    }
-    auto &cvt = *builder.create(ptx.str());
-    auto res = builder.newOperand("=h");
-    auto operand = builder.newOperand(v, "r");
-    cvt(res, operand);
-    // TODO: This is a hack to get the right type. We should be able to invoke
-    // the type converter
-    return builder.launch(rewriter, loc, i16_ty, false);
+
+    incrementMetric(rewriter, metricsAlloca, loc, 0, 1);
+    return createDummyValue(
+          rewriter, loc, f16_ty, 1, typeConverter);
   }
 
   static Value convertFp32ToFp16(Location loc,
                                  ConversionPatternRewriter &rewriter,
+                                 const LLVMTypeConverter& typeConverter,
+                                 Value metricsAlloca,
                                  const Value &v, const RoundingMode rounding) {
+    
+    incrementMetric(rewriter, metricsAlloca, loc, 0, 1);
+    return createDummyValue(rewriter, loc, f16_ty, 1, typeConverter);
+
     PTXBuilder builder;
     StringRef ptx;
     switch (rounding) {
@@ -439,7 +468,10 @@ struct FpToFpOpConversion
     auto convDesc = srcMap.lookup(key);
     return {makeConverterFromPtx(
                 convDesc.ptx, getTypeConverter()->convertType(srcTy),
-                getTypeConverter()->convertType(dstTy), convDesc.inVecWidthBits,
+                getTypeConverter()->convertType(dstTy), 
+                getTypeConverter(),
+                metricsAlloca,
+                convDesc.inVecWidthBits,
                 convDesc.outVecWidthBits),
             convDesc.numElements};
   }
@@ -451,6 +483,7 @@ struct FpToFpOpConversion
     auto srcElementType = getElementType(op.getSrc());
     auto dstElementType = getElementType(op.getResult());
     auto roundingMode = op.getRounding();
+
 
     if (dstElementType.isFloat8E5M2() || dstElementType.isFloat8E4M3FNUZ()) {
       assert(roundingMode.has_value() &&
@@ -471,7 +504,7 @@ struct FpToFpOpConversion
       SmallVector<Value> outVals;
       for (Value v : operands[0]) {
         outVals.push_back(
-            convertFp32ToFp16(loc, rewriter, v, roundingMode.value()));
+            convertFp32ToFp16(loc, rewriter,  *getTypeConverter(), metricsAlloca, v, roundingMode.value()));
       }
       return outVals;
     }
@@ -482,7 +515,10 @@ struct FpToFpOpConversion
       SmallVector<Value> outVals;
       for (Value v : operands[0]) {
         outVals.push_back(
-            convertFp32ToBf16(loc, rewriter, v, roundingMode.value()));
+            convertFp32ToBf16(loc, rewriter, 
+              *getTypeConverter(), metricsAlloca,
+              v, roundingMode.value()));
+       
       }
       return outVals;
     }
@@ -502,15 +538,17 @@ struct FpToFpOpConversion
       inVals.push_back(operands[i][0]);
     }
     if (useFP16IntermediateSrc)
-      for (Value &v : inVals)
-        v = convertFp32ToFp16(loc, rewriter, v, RoundingMode::RTZ);
+      for (Value &v : inVals){
+        v = convertFp32ToFp16(loc, rewriter, *getTypeConverter(), metricsAlloca, v, RoundingMode::RTZ);
+      }
     inVals.resize(numElements, undef(typeConverter->convertType(srcType)));
     SmallVector<Value> outVals = cvtFunc(loc, rewriter, inVals);
     assert(outVals.size() == inVals.size());
     outVals.resize(std::min(numElements, operands.size()));
     if (isDstFP32)
-      for (Value &v : outVals)
-        v = convertFp16ToFp32(loc, rewriter, v);
+      for (Value &v : outVals){
+        v = convertFp16ToFp32(loc, rewriter,  *getTypeConverter(), metricsAlloca, v);
+      }
     // Pack values
     return outVals;
   }
@@ -564,7 +602,13 @@ struct FMulOpConversion
                                    Location loc) const {
     auto lhsElemTy = getElementType(op.getLhs());
     auto rhsElemTy = getElementType(op.getRhs());
+    
+    incrementMetric(rewriter, metricsAlloca, loc, 2, 1);
+    
     if (lhsElemTy.isBF16() && rhsElemTy.isBF16()) {
+    
+      return {createDummyValue(rewriter, loc, lhsElemTy, 1, *getTypeConverter())};
+    
       PTXBuilder builder;
       auto ptxAsm = " { .reg .b16 c;        \n"
                     "    mov.b16 c, 0x8000U; \n" // 0.0
@@ -594,7 +638,12 @@ struct FAddOpConversion
                                    Location loc) const {
     auto lhsElemTy = getElementType(op.getLhs());
     auto rhsElemTy = getElementType(op.getRhs());
+    
+    incrementMetric(rewriter, metricsAlloca, loc, 2, 1);
+
     if (lhsElemTy.isBF16() && rhsElemTy.isBF16()) {
+      return {createDummyValue(rewriter, loc, lhsElemTy, 1, *getTypeConverter())};
+      
       PTXBuilder builder;
       auto ptxAsm = "{ .reg .b16 c;         \n"
                     "   mov.b16 c, 0x3f80U; \n" // 1.0
@@ -624,7 +673,11 @@ struct FSubOpConversion
                                    Location loc) const {
     auto lhsElemTy = getElementType(op.getLhs());
     auto rhsElemTy = getElementType(op.getRhs());
+    incrementMetric(rewriter, metricsAlloca, loc, 2, 1);
+
     if (lhsElemTy.isBF16() && rhsElemTy.isBF16()) {
+      return {createDummyValue(rewriter, loc, lhsElemTy, 1, *getTypeConverter())};
+      
       PTXBuilder builder;
       auto ptxAsm = " { .reg .b16 c;         \n"
                     "    mov.b16 c, 0xbf80U; \n" // -1.0
@@ -658,7 +711,9 @@ struct SIToFPOpConversion
     if (outElemTy.isBF16() && inElemTy.isInteger(8) && operands.size() >= 4) {
       auto cvtFunc = makeConverterFromPtx(
           S8_to_Bf16, getTypeConverter()->convertType(inElemTy),
-          getTypeConverter()->convertType(outElemTy));
+          getTypeConverter()->convertType(outElemTy), 
+          getTypeConverter(), metricsAlloca
+        );
       SmallVector<Value> inVals = {operands[0][0], operands[1][0],
                                    operands[2][0], operands[3][0]};
       auto outVals = cvtFunc(loc, rewriter, inVals);
@@ -666,7 +721,9 @@ struct SIToFPOpConversion
       return outVals;
     } else if (outElemTy.isBF16()) {
       auto value = rewriter.create<LLVM::SIToFPOp>(loc, f32_ty, operands[0][0]);
-      return {FpToFpOpConversion::convertFp32ToBf16(loc, rewriter, value,
+      return {FpToFpOpConversion::convertFp32ToBf16(loc, rewriter,
+                                                  *getTypeConverter(), metricsAlloca,                                             
+                                                  value,
                                                     RoundingMode::RTNE)};
     } else {
       return {rewriter.create<LLVM::SIToFPOp>(loc, elemTy, operands[0][0])};
@@ -733,7 +790,7 @@ struct TruncFOpConversion
       assert(inElemTy.isF32() && "unsupported conversion");
       return {// Trunc uses the default rounding mode: RTNE
               FpToFpOpConversion::convertFp32ToBf16(
-                  loc, rewriter, operands[0][0], RoundingMode::RTNE)};
+                  loc, rewriter, *getTypeConverter(), metricsAlloca, operands[0][0], RoundingMode::RTNE)};
     } else {
       return {rewriter.create<LLVM::FPTruncOp>(loc, elemTy, operands[0][0])};
     }
@@ -756,6 +813,9 @@ struct ExpOpConversionApprox
 
     const double log2e = 1.4426950408889634;
     Value prod = fmul(f32_ty, operands[0][0], f32_val(log2e));
+
+    return {createDummyValue(
+        rewriter, loc, f32_ty, 1, *getTypeConverter())};
 
     PTXBuilder ptxBuilder;
     auto &exp2 = ptxBuilder.create<PTXInstr>("ex2")->o("approx").o("f32");
@@ -841,6 +901,7 @@ struct ClampFOpConversion
                            .o("abs");
     const char *outType = nullptr;
     const char *inType = nullptr;
+
     if (elemTy.isF32()) {
       minXorsign.o("f32");
       outType = "=f";
@@ -850,6 +911,10 @@ struct ClampFOpConversion
       outType = "=h";
       inType = "h";
     }
+
+    return {createDummyValue(
+        rewriter, loc, elemTy, 1, *getTypeConverter())};
+
     auto output = ptxBuilder.newOperand(outType);
     auto inputA = ptxBuilder.newOperand(operands[0][0], inType);
     auto inputB = ptxBuilder.newOperand(operands[0][2], inType);

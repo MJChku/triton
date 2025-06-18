@@ -33,4 +33,22 @@ def ConvertTritonGPUToLLVM : Pass<"convert-triton-gpu-to-llvm", "mlir::ModuleOp"
     ];
 }
 
+def TaintAnalysisOnLLVM : Pass<"taint-analysis-on-llvm", "mlir::ModuleOp"> {
+    let summary = "Taint Analysis on LLVM";
+    let description = [{
+
+    }];
+    let constructor = "mlir::triton::createTaintAnalysisOnLLVMPass()";
+
+    let dependentDialects = ["mlir::arith::ArithDialect",
+                             "mlir::math::MathDialect",
+                             "mlir::scf::SCFDialect",
+                             "mlir::LLVM::LLVMDialect",
+                             "mlir::tensor::TensorDialect",
+                             ];
+
+    let options = [
+    ];
+}
+
 #endif

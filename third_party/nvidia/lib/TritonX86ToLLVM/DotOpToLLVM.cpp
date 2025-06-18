@@ -48,8 +48,7 @@ struct DotOpConversion : public ConvertOpToLLVMPattern<triton::DotOp> {
   matchAndRewrite(triton::DotOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     
-  metricsAlloca = ensureMetricsAlloc(
-        "triton.nvidia_gpu.dot.metric", 6, rewriter,
+  metricsAlloca = ensureMetricsAlloc("triton.metrics.dot", 6, rewriter,
         *getTypeConverter(), op->getParentOfType<LLVM::LLVMFuncOp>(),
          op->getLoc());
 
@@ -103,7 +102,7 @@ struct DotAsyncOpConversion
                   ConversionPatternRewriter &rewriter) const override {
     
     metricsAlloca = ensureMetricsAlloc(
-        "triton.nvidia_gpu.dot_async.metric", 6, rewriter,
+        "triton.metrics.dot_async", 6, rewriter,
         *getTypeConverter(), op->getParentOfType<LLVM::LLVMFuncOp>(),
         op.getLoc());
 

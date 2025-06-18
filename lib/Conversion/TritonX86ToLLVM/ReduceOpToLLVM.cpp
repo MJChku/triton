@@ -58,7 +58,7 @@ public:
     Location loc = op->getLoc();
   
     auto &tc = *getTypeConverter();
-    metricsAlloca = ensureMetricsAlloc("reduce_op_metric", 6, rewriter, tc, op->getParentOfType<LLVM::LLVMFuncOp>(), loc);
+    metricsAlloca = ensureMetricsAlloc("triton.metrics.reduce_op", 6, rewriter, tc, op->getParentOfType<LLVM::LLVMFuncOp>(), loc);
     llvm::errs() << "[Reduce op] [debug] alloca result type = " << "\n";
 
     auto srcValues = unpackInputs(loc, op, adaptor, rewriter);
@@ -304,33 +304,73 @@ private:
   }
 
   // Pack the accumulator values and replace the reduce op with the result.
+  // void packResults(ReduceOpHelper &helper,
+  //                  std::map<SmallVector<unsigned>, SmallVector<Value>> &accs,
+  //                  ConversionPatternRewriter &rewriter) const { 
+  
+
+  //   triton::ReduceOp op = helper.getOperation();
+  //   Location loc = op.getLoc();
+  //   unsigned axis = op.getAxis();
+  //   SmallVector<Value> results(op.getNumOperands());
+  //   for (unsigned i = 0; i < op.getNumOperands(); ++i) {
+  //     if (auto resultTy =
+  //             dyn_cast<RankedTensorType>(op.getResult()[i].getType())) {
+  //       auto resultLayout = cast<SliceEncodingAttr>(resultTy.getEncoding());
+  //       unsigned resultElems = getTotalElemsPerThread(resultTy);
+  //       SmallVector<SmallVector<unsigned>> resultOffset =
+  //           emitOffsetForLayout(resultLayout, resultTy);
+  //       SmallVector<Value> resultVals;
+  //       for (int j = 0; j < resultElems; j++) {
+  //         auto key = resultOffset[j];
+  //         key.insert(key.begin() + axis, 0);
+  //         resultVals.push_back(accs[key][i]);
+  //       }
+  //       results[i] = packLLElements(loc, getTypeConverter(), resultVals,
+  //                                   rewriter, resultTy);
+  //     } else
+  //       results[i] = accs.begin()->second[i];
+  //   }
+  //   rewriter.replaceOp(op, results);
+  // }
+
   void packResults(ReduceOpHelper &helper,
-                   std::map<SmallVector<unsigned>, SmallVector<Value>> &accs,
-                   ConversionPatternRewriter &rewriter) const {
-    return;
+                 std::map<SmallVector<unsigned>, SmallVector<Value>> &accs,
+                 ConversionPatternRewriter &rewriter) const { 
 
     triton::ReduceOp op = helper.getOperation();
     Location loc = op.getLoc();
     unsigned axis = op.getAxis();
     SmallVector<Value> results(op.getNumOperands());
+    
     for (unsigned i = 0; i < op.getNumOperands(); ++i) {
-      if (auto resultTy =
-              dyn_cast<RankedTensorType>(op.getResult()[i].getType())) {
+      if (auto resultTy = dyn_cast<RankedTensorType>(op.getResult()[i].getType())) {
+        // For tensor results, create dummy values for each element
         auto resultLayout = cast<SliceEncodingAttr>(resultTy.getEncoding());
         unsigned resultElems = getTotalElemsPerThread(resultTy);
-        SmallVector<SmallVector<unsigned>> resultOffset =
-            emitOffsetForLayout(resultLayout, resultTy);
+        
+        // Get the element type
+        Type elemTy = resultTy.getElementType();
+        
+        // Create dummy values for all elements
         SmallVector<Value> resultVals;
         for (int j = 0; j < resultElems; j++) {
-          auto key = resultOffset[j];
-          key.insert(key.begin() + axis, 0);
-          resultVals.push_back(accs[key][i]);
+          Value dummyVal = triton::gpu::createDummyValue(
+              rewriter, loc, elemTy, /*numElements=*/1, *getTypeConverter());
+          resultVals.push_back(dummyVal);
         }
+        
+        // Pack the dummy values into the result tensor
         results[i] = packLLElements(loc, getTypeConverter(), resultVals,
                                     rewriter, resultTy);
-      } else
-        results[i] = accs.begin()->second[i];
+      } else {
+        // For scalar results, create a single dummy value
+        Type _resultTy = op.getResult()[i].getType();
+        results[i] = triton::gpu::createDummyValue(
+            rewriter, loc, _resultTy, /*numElements=*/1, *getTypeConverter());
+      }
     }
+    
     rewriter.replaceOp(op, results);
   }
 

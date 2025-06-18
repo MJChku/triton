@@ -541,6 +541,7 @@ package_data = {
     "triton/tools": ["compile.h", "compile.c"],
     **{f"triton/backends/{b.name}": b.package_data
        for b in backends},
+    "triton/backends/x86":["compiler.py", "driver.py", "stubs.c"],
 }
 
 

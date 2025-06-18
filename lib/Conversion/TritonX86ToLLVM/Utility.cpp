@@ -7,6 +7,7 @@
 #include "triton/Dialect/TritonGPU/IR/Attributes.h"
 #include "triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/Support/raw_ostream.h"
 
 namespace SharedToDotOperandMMAv1 {
 using CoordTy = SmallVector<Value>;
@@ -117,53 +118,133 @@ namespace mlir {
 namespace triton::gpu {
 
   ///===----------------------------------------------------------------------===//
-  /// Helper: createDummyValue
-  ///
-  ///   • elemTy      = an MLIR element type (e.g. the tensor’s element or a scalar)
-  ///   • numElements = how many of those elements to pack in a flat LLVM value
-  ///   • typeConverter = an LLVMTypeConverter that lowers MLIR types to LLVM.
-  ///
-  /// Returns an LLVM‐side `Value` that is:
-  ///   • if numElements > 1: an `undef` of LLVM::VectorType<numElements x llElemTy>,
-  ///   • else if numElements == 1 and elemTy is FloatType/IntegerType: a zero constant
-  ///     of the converted LLVM type,
-  ///   • otherwise (unsupported type): returns nullptr (caller emits error).
+  /// Helper: createSingleDummyValue
+  /// 
+  /// Creates a single dummy value of the given element type by calling metrics_dummy()
+  /// and converting the i64 result to the target type.
   ///===----------------------------------------------------------------------===//
-  Value createDummyValue(RewriterBase &rewriter,
-                                Location loc,
-                                Type elemTy,
-                                unsigned numElements,
-                                const LLVMTypeConverter &typeConverter) {
+  Value createSingleDummyValue(RewriterBase &rewriter,
+                               Location loc,
+                               Type elemTy,
+                               const LLVMTypeConverter &typeConverter) {
     // 1) Lower the MLIR element type to LLVM:
-    Type llElemTy = typeConverter.convertType(elemTy);
-    if (!llElemTy)
-      return nullptr;
+    Type llElemTy = elemTy;
+    // Type llElemTy = typeConverter.convertType(elemTy);
+    // if (!llElemTy)
+      // return nullptr;
 
-    // 2) If we need >1 element, build a 1D VectorType<numElements x llElemTy>.
-    if (numElements > 1) {
-      VectorType vecTy = VectorType::get(
-          {static_cast<int64_t>(numElements)}, llElemTy);
-      return rewriter.create<LLVM::UndefOp>(loc, vecTy);
+    // 2) Ensure metrics_dummy function is declared
+    ModuleOp module = rewriter.getInsertionBlock()->getParentOp()->getParentOfType<ModuleOp>();
+    if (!module.lookupSymbol<LLVM::LLVMFuncOp>("metrics_dummy")) {
+      auto savedInsertionPoint = rewriter.saveInsertionPoint();
+      rewriter.setInsertionPointToStart(module.getBody());
+      
+      auto i64Ty = rewriter.getI64Type();
+      auto fnTy = LLVM::LLVMFunctionType::get(i64Ty, /*params=*/{}, /*isVarArg=*/false);
+      auto stub = rewriter.create<LLVM::LLVMFuncOp>(loc, "metrics_dummy", fnTy);
+      stub.setLinkage(LLVM::Linkage::External);
+      
+      rewriter.restoreInsertionPoint(savedInsertionPoint);
     }
-
-    // 3) Now numElements == 1.  Create a zero constant if it’s a float or integer:
+    
+    // 3) Call metrics_dummy() -> i64
+    auto i64Ty = rewriter.getI64Type();
+    auto dummyCall = rewriter.create<LLVM::CallOp>(
+        loc, /*resultTypes=*/TypeRange{i64Ty},
+        /*callee=*/rewriter.getStringAttr("metrics_dummy"),
+        /*args=*/ValueRange{});
+    
+    Value dummyI64 = dummyCall.getResult();
+    
+    // 4) Cast/truncate the i64 result to the target type
     if (isa<FloatType>(elemTy)) {
-      // Float zero (0.0 of correct bit‐width):
-      auto zeroAttr = rewriter.getFloatAttr(elemTy, 0.0);
-      return rewriter.create<LLVM::ConstantOp>(loc, llElemTy, zeroAttr);
+      // For float types: bitcast i64 -> double, then truncate if needed
+      if (elemTy.isF64()) {
+        // i64 -> f64 (bitcast)
+        return rewriter.create<LLVM::BitcastOp>(loc, llElemTy, dummyI64);
+      } else if (elemTy.isF32()) {
+        // i64 -> f32: truncate to i32, then bitcast to f32
+        auto i32Ty = rewriter.getI32Type();
+        Value truncated = rewriter.create<LLVM::TruncOp>(loc, i32Ty, dummyI64);
+        return rewriter.create<LLVM::BitcastOp>(loc, llElemTy, truncated);
+      } else if (elemTy.isF16()) {
+        // i64 -> f16: truncate to i16, then bitcast to f16
+        auto i16Ty = rewriter.getI16Type();
+        Value truncated = rewriter.create<LLVM::TruncOp>(loc, i16Ty, dummyI64);
+        return rewriter.create<LLVM::BitcastOp>(loc, llElemTy, truncated);
+      } else {
+        // Other float types: convert via double
+        auto f64Ty = rewriter.getF64Type();
+        Value asDouble = rewriter.create<LLVM::BitcastOp>(loc, f64Ty, dummyI64);
+        return rewriter.create<LLVM::FPTruncOp>(loc, llElemTy, asDouble);
+      }
     }
     else if (isa<IntegerType>(elemTy)) {
-      // Integer zero (0 of correct bit‐width):
-      unsigned width = cast<IntegerType>(elemTy).getWidth();
-      (void)width; // available if you need it, but not required for ConstantOp
-      auto zeroAttr = rewriter.getIntegerAttr(elemTy, 0);
-      return rewriter.create<LLVM::ConstantOp>(loc, llElemTy, zeroAttr);
+      auto intTy = cast<IntegerType>(elemTy);
+      unsigned width = intTy.getWidth();
+      
+      if (width == 64) {
+        // Already i64, use directly
+        return dummyI64;
+      } else if (width < 64) {
+        // Truncate i64 to smaller integer
+        return rewriter.create<LLVM::TruncOp>(loc, llElemTy, dummyI64);
+      } else {
+        // width > 64: extend (shouldn't happen in practice, but handle it)
+        return rewriter.create<LLVM::ZExtOp>(loc, llElemTy, dummyI64);
+      }
     }
 
-    // 4) All other types are unsupported here:
+    // 5) Unsupported type
     return nullptr;
   }
 
+ Value createDummyValue(RewriterBase &rewriter,
+                        Location loc,
+                        Type elemTy,
+                        unsigned numElements,
+                        const LLVMTypeConverter &typeConverter) {
+    
+    // 1) Single element case - call the helper
+    if (numElements == 1) {
+      return createSingleDummyValue(rewriter, loc, elemTy, typeConverter);
+    }
+
+
+    // 2) Multiple elements case - create a vector
+    Type llElemTy = elemTy; 
+    
+    // typeConverter.convertType(elemTy);
+    // if (!llElemTy)
+    //   return nullptr;
+
+    llvm::errs() << "Creating dummy vector with " << numElements 
+                 << " elements of type: " << elemTy << "\n";
+
+    SmallVector<Value> dummyElements;
+    dummyElements.reserve(numElements);
+    
+    // Create individual dummy values for each element
+    for (unsigned i = 0; i < numElements; ++i) {
+      Value singleDummy = createSingleDummyValue(rewriter, loc, elemTy, typeConverter);
+      if (!singleDummy)
+        return nullptr;
+      dummyElements.push_back(singleDummy);
+    }
+    
+    // Build vector from individual elements
+    VectorType vecTy = VectorType::get({static_cast<int64_t>(numElements)}, llElemTy);
+    Value vec = rewriter.create<LLVM::UndefOp>(loc, vecTy);
+    
+    for (unsigned i = 0; i < numElements; ++i) {
+      Value idx = rewriter.create<LLVM::ConstantOp>(
+          loc, rewriter.getI32Type(), rewriter.getI32IntegerAttr(i));
+      vec = rewriter.create<LLVM::InsertElementOp>(loc, vec, dummyElements[i], idx);
+    }
+    
+    return vec;
+  }
+  
   ///===----------------------------------------------------------------------===//
   /// replaceOpWithDummy
   ///

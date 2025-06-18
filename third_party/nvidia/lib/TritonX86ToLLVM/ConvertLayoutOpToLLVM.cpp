@@ -82,7 +82,7 @@ private:
       const NvidiaMmaEncodingAttr &mmaLayout,
       const DotOperandEncodingAttr &dotOperandLayout, bool isOuter) const {
     
-    metricAlloca = ensureMetricsAlloc("triton.gpu.localloadop.metric", 1, rewriter, *typeConverter,  op->getParentOfType<LLVM::LLVMFuncOp>(), op.getLoc());
+    metricAlloca = ensureMetricsAlloc("triton.metrics.localloadop", 1, rewriter, *typeConverter,  op->getParentOfType<LLVM::LLVMFuncOp>(), op.getLoc());
     auto loc = op.getLoc();
     auto src = op.getSrc();
     auto dst = op.getResult();

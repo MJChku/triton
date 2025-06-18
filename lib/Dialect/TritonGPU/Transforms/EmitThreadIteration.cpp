@@ -27,6 +27,9 @@ namespace gpu {
 struct TritonGPUEmitThreadIterationPass
     : public impl::TritonGPUEmitThreadIterationBase<TritonGPUEmitThreadIterationPass> {
   void runOnOperation() override {
+
+    return;
+    
     ModuleOp module = getOperation();
 
     // 1) Clone and prune IR to only ops influencing scf.for loops
@@ -125,35 +128,6 @@ struct TritonGPUEmitThreadIterationPass
 
 
     });
-
-    // just show this can run, nothing meaningful here
-    std::error_code ec;
-    llvm::raw_fd_ostream loopOut("thread_iterations.c", ec);
-    if (ec) {
-      module.emitError("cannot open stub file: " + ec.message());
-      return;
-    }
-    loopOut << "#include <stdint.h>\n#include <stdio.h>\n\n";
-
-    pruned.walk([&](FuncOp fn) {
-      if (!fn.isPublic()) return;
-      loopOut << "void " << fn.getName().str() << "_iter() {\n";
-      fn.walk([&](scf::ForOp forOp) {
-        auto printBound = [&](Value v, StringRef name) {
-          if (auto c = v.getDefiningOp<arith::ConstantIndexOp>())
-            loopOut << "  printf(\"" << name << " = %lld (static)\\n\", (long long)" << c.getValue() << ");\n";
-          else
-            loopOut << "  puts(\"" << name << " = dynamic\");\n";
-        };
-        printBound(forOp.getLowerBound(), "lb");
-        printBound(forOp.getUpperBound(), "ub");
-        printBound(forOp.getStep(), "step");
-      });
-      loopOut << "}\n\n";
-    });
-
-    loopOut << "int main() { return 0; }\n";
-    loopOut.close();
   }
 };
 
