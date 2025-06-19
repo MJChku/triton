@@ -23,9 +23,11 @@
 #include "PatternTritonGPUOpToLLVM.h"
 #include "Utility.h"
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
+#include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 
 using namespace mlir;
 using namespace mlir::triton;
+using ::mlir::triton::gpu::createDummyValue;
 
 namespace {
 struct MakeTensorPtrOpConversion
@@ -45,12 +47,16 @@ struct MakeTensorPtrOpConversion
     auto result = op.getResult();
 
     SmallVector<Value> elems;
-    for (auto offset : offsets)
+    for (auto offset : offsets){
       elems.push_back(offset);
-    for (auto shape : shapes)
+    }
+    for (auto shape : shapes){
       elems.push_back(shape);
-    for (auto stride : strides)
+    }
+
+    for (auto stride : strides){
       elems.push_back(stride);
+    }
 
     elems.push_back(base);
 

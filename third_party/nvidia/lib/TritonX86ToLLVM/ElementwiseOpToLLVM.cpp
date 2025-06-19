@@ -320,7 +320,7 @@ static ConverterT makeConverterFromPtx(const std::string &ptxAsm, Type inType,
     SmallVector<Value> ret;
     for (size_t i = 0; i < numElements; i++){
       ret.push_back(createDummyValue(
-          rewriter, loc, outType, 1, *typeConverter));
+          rewriter, loc, outType, 1));
     }
     return ret;
   };
@@ -360,7 +360,7 @@ struct FpToFpOpConversion
   
     incrementMetric(rewriter, metricsAlloca, loc, 0, 1);
     return createDummyValue(
-          rewriter, loc, f32_ty, 1, typeConverter);
+          rewriter, loc, f32_ty, 1);
 
     PTXBuilder builder;
     auto &cvt = *builder.create("cvt.f32.f16");
@@ -378,7 +378,7 @@ struct FpToFpOpConversion
 
     incrementMetric(rewriter, metricsAlloca, loc, 0, 1);
     return createDummyValue(
-          rewriter, loc, f16_ty, 1, typeConverter);
+          rewriter, loc, f16_ty, 1);
   }
 
   static Value convertFp32ToFp16(Location loc,
@@ -388,7 +388,7 @@ struct FpToFpOpConversion
                                  const Value &v, const RoundingMode rounding) {
     
     incrementMetric(rewriter, metricsAlloca, loc, 0, 1);
-    return createDummyValue(rewriter, loc, f16_ty, 1, typeConverter);
+    return createDummyValue(rewriter, loc, f16_ty, 1);
 
     PTXBuilder builder;
     StringRef ptx;
@@ -607,7 +607,7 @@ struct FMulOpConversion
     
     if (lhsElemTy.isBF16() && rhsElemTy.isBF16()) {
     
-      return {createDummyValue(rewriter, loc, lhsElemTy, 1, *getTypeConverter())};
+      return {createDummyValue(rewriter, loc, lhsElemTy, 1)};
     
       PTXBuilder builder;
       auto ptxAsm = " { .reg .b16 c;        \n"
@@ -642,7 +642,7 @@ struct FAddOpConversion
     incrementMetric(rewriter, metricsAlloca, loc, 2, 1);
 
     if (lhsElemTy.isBF16() && rhsElemTy.isBF16()) {
-      return {createDummyValue(rewriter, loc, lhsElemTy, 1, *getTypeConverter())};
+      return {createDummyValue(rewriter, loc, lhsElemTy, 1)};
       
       PTXBuilder builder;
       auto ptxAsm = "{ .reg .b16 c;         \n"
@@ -676,7 +676,7 @@ struct FSubOpConversion
     incrementMetric(rewriter, metricsAlloca, loc, 2, 1);
 
     if (lhsElemTy.isBF16() && rhsElemTy.isBF16()) {
-      return {createDummyValue(rewriter, loc, lhsElemTy, 1, *getTypeConverter())};
+      return {createDummyValue(rewriter, loc, lhsElemTy, 1)};
       
       PTXBuilder builder;
       auto ptxAsm = " { .reg .b16 c;         \n"
@@ -815,7 +815,7 @@ struct ExpOpConversionApprox
     Value prod = fmul(f32_ty, operands[0][0], f32_val(log2e));
 
     return {createDummyValue(
-        rewriter, loc, f32_ty, 1, *getTypeConverter())};
+        rewriter, loc, f32_ty, 1)};
 
     PTXBuilder ptxBuilder;
     auto &exp2 = ptxBuilder.create<PTXInstr>("ex2")->o("approx").o("f32");
@@ -913,7 +913,7 @@ struct ClampFOpConversion
     }
 
     return {createDummyValue(
-        rewriter, loc, elemTy, 1, *getTypeConverter())};
+        rewriter, loc, elemTy, 1)};
 
     auto output = ptxBuilder.newOperand(outType);
     auto inputA = ptxBuilder.newOperand(operands[0][0], inType);

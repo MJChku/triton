@@ -80,13 +80,19 @@ static bool matchTritonAttr(StringRef name) {
           name.rfind("tt.") != StringRef::npos);
 }
 
+class X86LLVMConversionTargetCleanUp : public ConversionTarget {
+public:
+  explicit X86LLVMConversionTargetCleanUp(MLIRContext &ctx)
+      : ConversionTarget(ctx) {
+    addIllegalOp<mlir::UnrealizedConversionCastOp>();
+  }
+};
+
 class X86LLVMConversionTarget : public ConversionTarget {
 public:
   explicit X86LLVMConversionTarget(MLIRContext &ctx)
       : ConversionTarget(ctx) {
     addLegalDialect<LLVM::LLVMDialect>();
-    // addLegalDialect<NVVM::NVVMDialect>();
-    // addLegalDialect<mlir::triton::nvgpu::NVGPUDialect>();
 
     addIllegalDialect<NVVM::NVVMDialect>();
     addIllegalDialect<mlir::triton::nvgpu::NVGPUDialect>();
@@ -94,6 +100,7 @@ public:
     addIllegalDialect<triton::gpu::TritonGPUDialect>();
     addIllegalDialect<triton::nvidia_gpu::TritonNvidiaGPUDialect>();
     addIllegalDialect<mlir::gpu::GPUDialect>();
+
     addLegalOp<mlir::UnrealizedConversionCastOp>();
     
     addDynamicallyLegalOp<LLVM::InlineAsmOp>(
@@ -268,6 +275,14 @@ struct ConvertTritonGPUToLLVM
       return signalPassFailure();
     
     convertPtrAddressSpace(x86TypeConverter);
+    
+    // RewritePatternSet patterns_strip_clean_up(context);
+    // mlir::triton::populateStripGPUAndSetX86CleanUp(x86TypeConverter, patterns_strip_clean_up, targetInfo);
+    
+    // X86LLVMConversionTargetCleanUp x86ConvTargetCleanUp(*context);
+    // if (failed(applyPartialConversion(mod, x86ConvTargetCleanUp, std::move(patterns_strip_clean_up))))
+    //   return signalPassFailure();
+
 
     // Fold CTAId when there is only 1 CTA.
     if (numCTAs == 1) {
@@ -336,6 +351,13 @@ private:
         stub.setLinkage(LLVM::Linkage::External);
       }
 
+      if (!module.lookupSymbol<LLVM::LLVMFuncOp>("nvvm_nctaid")) {
+        OpBuilder builder(&getContext());
+        builder.setInsertionPointToStart(module.getBody());
+        auto stub = builder.create<LLVM::LLVMFuncOp>(loc, "nvvm_nctaid", fnTy);
+        stub.setLinkage(LLVM::Linkage::External);
+      }
+
       if (!module.lookupSymbol<LLVM::LLVMFuncOp>("nvvm_tid")) {
         OpBuilder builder(&getContext());
         builder.setInsertionPointToStart(module.getBody());
@@ -352,6 +374,13 @@ private:
         OpBuilder builder(&getContext());
         builder.setInsertionPointToStart(module.getBody());
         auto stub = builder.create<LLVM::LLVMFuncOp>(loc, "nvvm_barrier0", fnTy);
+        stub.setLinkage(LLVM::Linkage::External);
+      }
+      
+      if (!module.lookupSymbol<LLVM::LLVMFuncOp>("nvvm_star")) {
+        OpBuilder builder(&getContext());
+        builder.setInsertionPointToStart(module.getBody());
+        auto stub = builder.create<LLVM::LLVMFuncOp>(loc, "nvvm_star", fnTy);
         stub.setLinkage(LLVM::Linkage::External);
       }
     }
@@ -418,10 +447,6 @@ private:
       }
 
     });
-  }
-
-  void insertBranchAssertions(){
-
   }
 
 // mjc

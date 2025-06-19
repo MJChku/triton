@@ -18,6 +18,7 @@ using ::mlir::triton::gpu::getTotalElemsPerThread;
 using ::mlir::triton::gpu::isaDistributedLayout;
 using ::mlir::triton::gpu::SharedEncodingAttr;
 using ::mlir::triton::gpu::incrementMetric;
+using ::mlir::triton::gpu::createDummyValue;
 
 // Data loader for mma.16816 instruction.
 class MMA16816SmemLoader {
@@ -515,17 +516,26 @@ Value composeValuesToDotOperandLayoutStruct(
     const LLVMTypeConverter *typeConverter, Location loc,
     ConversionPatternRewriter &rewriter) {
   std::vector<Value> elems;
+  Value example = vals.at({0, 0, 0});
+  Type elemTy = example.getType();
   for (int b = 0; b < batch; ++b)
     for (int m = 0; m < n0; ++m)
       for (int k = 0; k < n1; ++k) {
-        elems.push_back(vals.at({b, 2 * m, 2 * k}));
-        elems.push_back(vals.at({b, 2 * m, 2 * k + 1}));
-        elems.push_back(vals.at({b, 2 * m + 1, 2 * k}));
-        elems.push_back(vals.at({b, 2 * m + 1, 2 * k + 1}));
-      }
+        // elems.push_back(vals.at({b, 2 * m, 2 * k}));
+        // elems.push_back(vals.at({b, 2 * m, 2 * k + 1}));
+        // elems.push_back(vals.at({b, 2 * m + 1, 2 * k}));
+        // elems.push_back(vals.at({b, 2 * m + 1, 2 * k + 1}));
+        elems.push_back(
+            createDummyValue(rewriter, loc, elemTy, 1));
+        elems.push_back(
+            createDummyValue(rewriter, loc, elemTy, 1));
+        elems.push_back(
+            createDummyValue(rewriter, loc, elemTy, 1));
+        elems.push_back(
+            createDummyValue(rewriter, loc, elemTy, 1));
+    }
   assert(!elems.empty());
-
-  Type elemTy = elems[0].getType();
+  // Type elemTy = elems[0].getType();
   MLIRContext *ctx = elemTy.getContext();
   Type structTy = LLVM::LLVMStructType::getLiteral(
       ctx, SmallVector<Type>(elems.size(), elemTy));

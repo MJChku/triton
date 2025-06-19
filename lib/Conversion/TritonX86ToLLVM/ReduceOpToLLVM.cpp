@@ -15,6 +15,7 @@ using ::mlir::triton::gpu::getOrder;
 using ::mlir::triton::gpu::getTotalElemsPerThread;
 using ::mlir::triton::gpu::ensureMetricsAlloc;
 using ::mlir::triton::gpu::incrementMetric;
+using ::mlir::triton::gpu::createDummyValue;
 
 namespace {
 
@@ -114,46 +115,14 @@ private:
 
   mutable Value metricsAlloca;
 
-  /// Replace the given ReduceOp <op> with a set of “dummy” results, _but do not erase_.
-  /// All original users of <op> will now see either:
-  ///   • an LLVM::UndefOp (for tensor‐typed results), or
-  ///   • a zero‐constant (for scalar results).
-  ///
-  /// Note: we do NOT generate any reduction code here—just enough to preserve SSA uses.
+
   void replaceReduceWithDummy(RewriterBase &rewriter,
                               triton::ReduceOp op) const {
     Location loc = op.getLoc();
       SmallVector<Value> dummies;
     for (Type ty : op->getResultTypes()) {
-      Value v;
-
-      if (auto tensorTy = dyn_cast<RankedTensorType>(ty)) {
-        // For tensors: create an LLVM-undef of the lowered element type
-        Type elemTyLL = getTypeConverter()->convertType(tensorTy.getElementType());
-        // Flatten to an LLVM vector/array matching #elements.
-        unsigned elems = tensorTy.getNumElements();
-        Type flatTy =
-            elems == 1 ? elemTyLL : VectorType::get({static_cast<int64_t>(elems)}, elemTyLL);
-        v = rewriter.create<LLVM::UndefOp>(loc, flatTy);
-        // If you need to re-pack into the tensor layout, call your existing
-        // packLLElements helper here ­– otherwise users expecting TTGIR/LLIR can
-        // consume the undef directly.
-      } else if (ty.isIntOrFloat()) {
-        // Scalar: emit constant zero of the right bit-width
-        if (isa<FloatType>(ty))
-          v = rewriter.create<LLVM::ConstantOp>(
-              loc, getTypeConverter()->convertType(ty),
-              rewriter.getFloatAttr(ty, 0.0));
-        else
-          v = rewriter.create<LLVM::ConstantOp>(
-              loc, getTypeConverter()->convertType(ty),
-              rewriter.getIntegerAttr(ty, 0));
-      } else {
-        // Fallback: LLVM undef of converted type
-        v = rewriter.create<LLVM::UndefOp>(
-            loc, getTypeConverter()->convertType(ty));
-      }
-
+      Value v = createDummyValue(
+          rewriter, loc, ty, /*numElements=*/1);
       dummies.push_back(v);
     }
 
@@ -356,7 +325,7 @@ private:
         SmallVector<Value> resultVals;
         for (int j = 0; j < resultElems; j++) {
           Value dummyVal = triton::gpu::createDummyValue(
-              rewriter, loc, elemTy, /*numElements=*/1, *getTypeConverter());
+              rewriter, loc, elemTy, /*numElements=*/1);
           resultVals.push_back(dummyVal);
         }
         
@@ -367,7 +336,7 @@ private:
         // For scalar results, create a single dummy value
         Type _resultTy = op.getResult()[i].getType();
         results[i] = triton::gpu::createDummyValue(
-            rewriter, loc, _resultTy, /*numElements=*/1, *getTypeConverter());
+            rewriter, loc, _resultTy, /*numElements=*/1);
       }
     }
     

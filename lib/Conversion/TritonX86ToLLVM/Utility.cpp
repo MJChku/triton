@@ -125,8 +125,7 @@ namespace triton::gpu {
   ///===----------------------------------------------------------------------===//
   Value createSingleDummyValue(RewriterBase &rewriter,
                                Location loc,
-                               Type elemTy,
-                               const LLVMTypeConverter &typeConverter) {
+                               Type elemTy) {
     // 1) Lower the MLIR element type to LLVM:
     Type llElemTy = elemTy;
     // Type llElemTy = typeConverter.convertType(elemTy);
@@ -202,12 +201,11 @@ namespace triton::gpu {
  Value createDummyValue(RewriterBase &rewriter,
                         Location loc,
                         Type elemTy,
-                        unsigned numElements,
-                        const LLVMTypeConverter &typeConverter) {
+                        unsigned numElements) {
     
     // 1) Single element case - call the helper
     if (numElements == 1) {
-      return createSingleDummyValue(rewriter, loc, elemTy, typeConverter);
+      return createSingleDummyValue(rewriter, loc, elemTy);
     }
 
 
@@ -226,7 +224,7 @@ namespace triton::gpu {
     
     // Create individual dummy values for each element
     for (unsigned i = 0; i < numElements; ++i) {
-      Value singleDummy = createSingleDummyValue(rewriter, loc, elemTy, typeConverter);
+      Value singleDummy = createSingleDummyValue(rewriter, loc, elemTy);
       if (!singleDummy)
         return nullptr;
       dummyElements.push_back(singleDummy);
@@ -273,7 +271,7 @@ namespace triton::gpu {
         Type elemTy    = tensorTy.getElementType();
         unsigned count = tensorTy.getNumElements();
         dummyForThisResult = createDummyValue(
-            rewriter, loc, elemTy, count, typeConverter);
+            rewriter, loc, elemTy, count);
         if (!dummyForThisResult) {
           op->emitError("replaceOpWithDummy: unable to lower element type ")
               << elemTy << " of tensor<" << tensorTy << ">";
@@ -285,7 +283,7 @@ namespace triton::gpu {
       } else if (resultTy.isIntOrFloat()) {
         // Single‐element scalar (int or float)
         dummyForThisResult = createDummyValue(
-            rewriter, loc, resultTy, /*numElements=*/1, typeConverter);
+            rewriter, loc, resultTy, /*numElements=*/1);
         if (!dummyForThisResult) {
           op->emitError("replaceOpWithDummy: unable to lower scalar type ")
               << resultTy;
@@ -321,7 +319,7 @@ namespace triton::gpu {
 
     for (unsigned i = 0; i < totalElems; ++i) {
       Value oneDummy = createDummyValue(
-          rewriter, loc, elemType, /*numElements=*/1, typeConverter);
+          rewriter, loc, elemType, /*numElements=*/1);
       if (!oneDummy) {
         op->emitError("replaceOpWithDummyPacked: unsupported element type '")
             << elemType << ">";

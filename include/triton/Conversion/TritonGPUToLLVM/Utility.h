@@ -211,8 +211,7 @@ enum class MetricId : unsigned int {
 Value createDummyValue(RewriterBase &rewriter,
                         Location loc,
                         Type elemTy,
-                        unsigned numElements,
-                        const LLVMTypeConverter &typeConverter);
+                        unsigned numElements);
 
 void replaceOpWithDummyPacked(ConversionPatternRewriter &rewriter,
                               const LLVMTypeConverter &typeConverter,

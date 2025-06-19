@@ -20,6 +20,9 @@ void init_triton_nvidia_passes_ttgpuir(py::module &&m) {
   m.def("add_to_llvmir", [](mlir::PassManager &pm, int32_t capability) {
     pm.addPass(mlir::triton::createConvertTritonGPUToLLVMPass(capability));
   });
+  m.def("add_x86_taint_analysis", [](mlir::PassManager &pm) {
+    pm.addPass(mlir::triton::createTaintAnalysisOnLLVMPass());
+  });
   m.def("add_decompose_unsupported_conversions", [](mlir::PassManager &pm) {
     pm.addPass(NVIDIA::createDecomposeUnsupportedConversionsPass());
   });

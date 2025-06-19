@@ -265,18 +265,32 @@ Value TargetInfo::ballot(ConversionPatternRewriter &rewriter, Location loc,
   Value threadMask = int_val(type.getIntOrFloatBitWidth(), -1);
   return rewriter.create<NVVM::VoteBallotOp>(loc, type, threadMask, cmp);
 }
+
+// void TargetInfo::storeShared(ConversionPatternRewriter &rewriter, Location loc,
+//                              Value ptr, Value val, Value pred) const {
+//   MLIRContext *ctx = rewriter.getContext();
+//   unsigned bits = std::max(8u, val.getType().getIntOrFloatBitWidth());
+//   const char *c = bits == 64 ? "l" : (bits == 16 ? "h" : "r");
+
+//   PTXBuilder builder;
+//   auto *ptrOpr = builder.newAddrOperand(ptr, "r");
+//   auto *valOpr = builder.newOperand(val, c);
+//   auto &st = builder.create<>("st")->shared().b(bits);
+//   st(ptrOpr, valOpr).predicate(pred, "b");
+//   builder.launch(rewriter, loc, void_ty(ctx));
+// }
+
 void TargetInfo::storeShared(ConversionPatternRewriter &rewriter, Location loc,
                              Value ptr, Value val, Value pred) const {
   MLIRContext *ctx = rewriter.getContext();
-  unsigned bits = std::max(8u, val.getType().getIntOrFloatBitWidth());
-  const char *c = bits == 64 ? "l" : (bits == 16 ? "h" : "r");
-
-  PTXBuilder builder;
-  auto *ptrOpr = builder.newAddrOperand(ptr, "r");
-  auto *valOpr = builder.newOperand(val, c);
-  auto &st = builder.create<>("st")->shared().b(bits);
-  st(ptrOpr, valOpr).predicate(pred, "b");
-  builder.launch(rewriter, loc, void_ty(ctx));
+  
+  if (pred) {
+    Value oldVal = rewriter.create<LLVM::LoadOp>(loc, val.getType(), ptr);
+    Value newVal = rewriter.create<LLVM::SelectOp>(loc, pred, val, oldVal);
+    rewriter.create<LLVM::StoreOp>(loc, newVal, ptr);
+  } else {
+    rewriter.create<LLVM::StoreOp>(loc, val, ptr);
+  }
 }
 
 Value TargetInfo::loadShared(ConversionPatternRewriter &rewriter, Location loc,
@@ -284,18 +298,50 @@ Value TargetInfo::loadShared(ConversionPatternRewriter &rewriter, Location loc,
                              Type elemTy, Value pred) const {
   MLIRContext *ctx = rewriter.getContext();
   auto ptrTy = cast<LLVM::LLVMPointerType>(ptr.getType());
-  assert(ptrTy.getAddressSpace() == 3 && "Invalid addr space for loadShared");
-  unsigned bitwidth = std::max(8u, elemTy.getIntOrFloatBitWidth());
-
-  const char *c = bitwidth == 64 ? "=l" : (bitwidth == 16 ? "=h" : "=r");
-
-  PTXBuilder builder;
-  auto *dOpr = builder.newOperand(c);
-  auto *ptrOpr = builder.newAddrOperand(ptr, "r");
-  auto &ld = builder.create<>("ld")->shared().b(bitwidth);
-  ld(dOpr, ptrOpr).predicate(pred, "b");
-  return builder.launch(rewriter, loc, elemTy);
+  
+  if (pred) {
+    // Conditional load with zero fallback
+    Value condition = pred;
+    Value loadedValue = rewriter.create<LLVM::LoadOp>(loc, elemTy, ptr);
+    
+    // Create zero constant for false case
+    Value zeroValue;
+    if (auto intType = dyn_cast<IntegerType>(elemTy)) {
+      zeroValue = rewriter.create<LLVM::ConstantOp>(loc, elemTy, 
+                                                    rewriter.getIntegerAttr(elemTy, 0));
+    } else if (auto floatType = dyn_cast<FloatType>(elemTy)) {
+      zeroValue = rewriter.create<LLVM::ConstantOp>(loc, elemTy,
+                                                    rewriter.getFloatAttr(elemTy, 0.0));
+    } else {
+      zeroValue = rewriter.create<LLVM::UndefOp>(loc, elemTy);
+    }
+    
+    Value result = rewriter.create<LLVM::SelectOp>(loc, condition, loadedValue, zeroValue);
+    return result;
+  } else {
+    // Simple unconditional load
+    return rewriter.create<LLVM::LoadOp>(loc, elemTy, ptr);
+  }
 }
+
+
+// Value TargetInfo::loadShared(ConversionPatternRewriter &rewriter, Location loc,
+//                              const TypeConverter *converter, Value ptr,
+//                              Type elemTy, Value pred) const {
+//   MLIRContext *ctx = rewriter.getContext();
+//   auto ptrTy = cast<LLVM::LLVMPointerType>(ptr.getType());
+//   assert(ptrTy.getAddressSpace() == 3 && "Invalid addr space for loadShared");
+//   unsigned bitwidth = std::max(8u, elemTy.getIntOrFloatBitWidth());
+
+//   const char *c = bitwidth == 64 ? "=l" : (bitwidth == 16 ? "=h" : "=r");
+
+//   PTXBuilder builder;
+//   auto *dOpr = builder.newOperand(c);
+//   auto *ptrOpr = builder.newAddrOperand(ptr, "r");
+//   auto &ld = builder.create<>("ld")->shared().b(bitwidth);
+//   ld(dOpr, ptrOpr).predicate(pred, "b");
+//   return builder.launch(rewriter, loc, elemTy);
+// }
 
 Value TargetInfo::shuffleXor(ConversionPatternRewriter &rewriter, Location loc,
                              Value val, int i) const {

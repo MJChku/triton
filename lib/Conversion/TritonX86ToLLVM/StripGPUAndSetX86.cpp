@@ -21,10 +21,13 @@
 #include "nvidia/include/Dialect/NVGPU/IR/Dialect.h"
 #include "triton/Conversion/TritonGPUToLLVM/PatternTritonGPUOpToLLVM.h"
 #include "llvm/ADT/StringRef.h"
+#include <cstddef>
 #include "mlir/Dialect/LLVMIR/NVVMDialect.h"
+#include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 
 using namespace mlir;
 using namespace mlir::triton::nvgpu;
+using ::mlir::triton::gpu::createDummyValue;
 
 namespace {
 
@@ -61,11 +64,25 @@ struct StripGPUAttrsInModule : public ConversionPattern {
                   ConversionPatternRewriter &rewriter) const override {
     auto module = cast<ModuleOp>(op);
 
-    // 1) Collect any attributes named "triton_gpu.*" or "nvvm.*".
+    // 1) Collect any attributes named "triton_gpu.*" or "nvvm.*" and "triton_gpu.*" to rename
     SmallVector<StringRef> toErase;
+    SmallVector<std::pair<StringRef, Attribute>> toRename;
+    
     for (NamedAttribute na : module->getAttrs()) {
       StringRef name = na.getName().getValue();
-      if (matchTritonAttr(name)) {
+      
+      if (name.starts_with("triton_gpu.")) {
+        // Rename triton_gpu.* to triton_x86.*
+        std::string newName = name.str();
+        newName.replace(0, 10, "triton_x86"); // Replace "triton_gpu" with "triton_x86"
+        
+        llvm::errs() << "Renaming module attribute: " << name << " -> " << newName << "\n";
+        toRename.push_back({name, na.getValue()});
+        toErase.push_back(name);
+        
+        // Add the renamed attribute
+        module->setAttr(StringAttr::get(module.getContext(), newName), na.getValue());
+      } else if (matchTritonAttr(name)) {
         llvm::errs() << "Erasing module attribute: " << name << "\n";
         toErase.push_back(name);
       }
@@ -73,6 +90,8 @@ struct StripGPUAttrsInModule : public ConversionPattern {
 
     // 2) Perform in-place edits on `module`.
     rewriter.startOpModification(op);
+    
+    // Remove old attributes
     for (StringRef n : toErase)
       module->removeAttr(n);
 
@@ -200,6 +219,8 @@ struct ConvertReadTidX : public ConversionPattern{
 };
 
 
+
+
 struct ConvertReadTidY : public ConversionPattern{
   explicit ConvertReadTidY(MLIRContext *ctx)
       : ConversionPattern(NVVM::ThreadIdYOp::getOperationName(),
@@ -268,6 +289,33 @@ struct ConvertBarrier0Op: public ConversionPattern{
   }
 };
 
+struct ConvertShflOp: public ConversionPattern{
+  explicit ConvertShflOp(MLIRContext *ctx)
+      : ConversionPattern(NVVM::ShflOp::getOperationName(),
+                          /*benefit=*/1, ctx) {}
+
+  LogicalResult
+  matchAndRewrite(Operation *op, ArrayRef<Value> /*operands*/,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op->getLoc();
+    
+    // Create dummy results for operations that expect a result
+    if (op->getNumResults() > 0) {
+      SmallVector<Value> dummyResults;
+      for (auto result : op->getResults()) {
+        Value dummyResult = createDummyValue(rewriter, loc, result.getType(), 1);
+        dummyResults.push_back(dummyResult);
+      }
+      rewriter.replaceOp(op, dummyResults);
+    } else {
+      rewriter.eraseOp(op);
+    }
+    
+    return success();
+  }
+};
+
+
 struct ConvertClusterId : public ConversionPattern{
   explicit ConvertClusterId(MLIRContext *ctx)
       : ConversionPattern(nvgpu::ClusterCTAIdOp::getOperationName(),
@@ -314,19 +362,24 @@ struct ConvertGlobalInline : public ConversionPattern{
     auto asmStr = asmOp.getAsmString();
     bool isLoad  = asmStr.contains("ld.global");
     bool isStore = asmStr.contains("st.global");
-    bool isCTAId = asmStr.contains("ctaid.");
-    bool isCopy = asmStr.contains("cp.");
+    bool isNCTAId = asmStr.contains("nctaid.");
+    bool isCTAId = asmStr.contains("ctaid.") && !isNCTAId;
+    bool isRemove = asmStr.contains("cp.") || asmStr.contains(".sync") || asmStr.contains(".async");
     bool isDivision = asmStr.contains("div.full.f32");
     bool isPrmt = asmStr.contains("prmt.b32");
 
+    bool isLoadShared = asmStr.contains("ld.shared");
+    bool isStoreShared = asmStr.contains("st.shared");
+
+
+
     Location loc = op->getLoc();
     
+    llvm::errs() << "Converting InlineAsmOp: " << asmStr << "\n";
     /* ---------- PRMT.B32 BYTE PERMUTE ---------------------------------------- */
     if (isPrmt) {
       llvm::errs() << "Converting PTX prmt.b32: " << asmStr << "\n";
       
-      // prmt.b32 typically takes 1 input (i32) and produces 2 outputs (vector<2xf16> each)
-      // Pattern: (i32) -> !llvm.struct<(vector<2xf16>, vector<2xf16>)>
       if (asmOp.getNumOperands() != 1) return failure();
       if (asmOp.getNumResults() != 1) return failure();
       
@@ -393,7 +446,7 @@ struct ConvertGlobalInline : public ConversionPattern{
       rewriter.replaceOp(op, result);
       return success();
     }
-    if (isCopy) {
+    if (isRemove) {
       llvm::errs() << "Converting cp.* instruction: " << asmStr << "\n";
       
       // These are async memory copy operations - for x86, just ignore them
@@ -614,6 +667,34 @@ struct ConvertGlobalInline : public ConversionPattern{
       return success();
     }
 
+    if (isNCTAId){
+      int axis = -1;
+      bool isCtaIdX = asmStr.contains("%nctaid.x");
+      bool isCtaIdY = asmStr.contains("%nctaid.y");
+      bool isCtaIdZ = asmStr.contains("%nctaid.z");
+      if(isCtaIdX) axis = 0;
+      else if(isCtaIdY) axis = 1;
+      else if(isCtaIdZ) axis = 2;
+      
+      if (asmOp.getNumOperands() != 0) return failure();
+      if (asmOp.getNumResults()  != 1) return failure();
+      Type resTy = asmOp.getResult(0).getType();
+      if (!resTy.isSignlessInteger(32)) return failure();
+
+      auto i32Ty = rewriter.getIntegerType(32);
+      Value axisConst = rewriter.create<LLVM::ConstantOp>(
+          loc, i32Ty, rewriter.getIntegerAttr(i32Ty, axis));
+
+      auto call = rewriter.replaceOpWithNewOp<LLVM::CallOp>(
+          op,
+          /*resultTypes=*/TypeRange{i32Ty},
+          /*callee=*/rewriter.getStringAttr("nvvm_nctaid"),
+          /*args=*/ValueRange{axisConst});
+
+      return success();
+    }
+
+
     return failure();
   }
 };
@@ -726,7 +807,152 @@ struct ConvertMetricsAlloca : public ConversionPattern {
   }
 };
 
+struct ConvertUnrealizedConversionCast : public ConversionPattern {
+  explicit ConvertUnrealizedConversionCast(MLIRContext *ctx)
+      : ConversionPattern(UnrealizedConversionCastOp::getOperationName(),
+                          /*benefit=*/1, ctx) {}
 
+  LogicalResult
+  matchAndRewrite(Operation *op, ArrayRef<Value> /*operands*/,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto castOp = dyn_cast<UnrealizedConversionCastOp>(op);
+    if (!castOp)
+      return failure();
+
+    if (castOp.getInputs().size() != 1 || castOp.getOutputs().size() != 1)
+      return failure();
+
+    Value input = castOp.getInputs()[0];
+    Value output = castOp.getOutputs()[0];
+    Type inputType = input.getType();
+    Type outputType = output.getType();
+
+    Location loc = castOp.getLoc();
+
+    llvm::errs() << "Converting unrealized_conversion_cast from " 
+                 << inputType << " to " << outputType << "\n";
+
+    // CRITICAL: Block any conversion TO Triton types
+    if (
+        mlir::isa<RankedTensorType>(outputType) ||
+        outputType.getDialect().getNamespace() == "tt" ||
+        outputType.getDialect().getNamespace() == "triton_gpu") {
+      
+      llvm::errs() << "BLOCKING conversion to Triton type: " << outputType << "\n";
+      rewriter.replaceOp(castOp, input);
+      return success();
+
+      if (auto tritonPtrType = dyn_cast<triton::PointerType>(outputType)) {
+        // Create equivalent LLVM pointer type
+        auto llvmPtrType = LLVM::LLVMPointerType::get(rewriter.getContext(), 0);
+        
+        if (inputType == llvmPtrType) {
+          // Direct replacement - don't create tt.ptr
+          rewriter.replaceOp(castOp, input);
+        } else {
+          // Convert to LLVM pointer, not tt.ptr
+          Value converted;
+          if (auto inputPtrType = dyn_cast<LLVM::LLVMPointerType>(inputType)) {
+            // Pointer to pointer cast
+            converted = rewriter.create<LLVM::BitcastOp>(loc, llvmPtrType, input);
+          } else if (auto inputIntType = dyn_cast<IntegerType>(inputType)) {
+            // Int to pointer
+            converted = rewriter.create<LLVM::IntToPtrOp>(loc, llvmPtrType, input);
+          } else {
+            // Fallback bitcast
+            converted = rewriter.create<LLVM::BitcastOp>(loc, llvmPtrType, input);
+          }
+          rewriter.replaceOp(castOp, converted);
+        }
+        return success();
+      }
+      
+      // For other Triton types, force replacement with input
+      llvm::errs() << "Forcing replacement with input to prevent illegal operation\n";
+      rewriter.replaceOp(castOp, input);
+      return success();
+    }
+
+    if (
+        mlir::isa<RankedTensorType>(inputType) ||
+        inputType.getDialect().getNamespace() == "tt" ||
+        inputType.getDialect().getNamespace() == "triton_gpu") {
+      
+      llvm::errs() << "BLOCKING conversion from Triton type: " << inputType << "\n";
+      rewriter.replaceOp(castOp, input);
+      return success();
+    }
+
+    // Rest of your existing logic for LLVM-to-LLVM conversions...
+    
+    // Identical types
+    if (inputType == outputType) {
+      rewriter.replaceOp(castOp, input);
+      return success();
+    }
+
+    // LLVM pointer conversions
+    auto inputPtrTy = dyn_cast<LLVM::LLVMPointerType>(inputType);
+    auto outputPtrTy = dyn_cast<LLVM::LLVMPointerType>(outputType);
+    
+    if (inputPtrTy && outputPtrTy) {
+      if (inputPtrTy.getAddressSpace() != outputPtrTy.getAddressSpace()) {
+        Value converted = rewriter.create<LLVM::AddrSpaceCastOp>(
+            loc, outputPtrTy, input);
+        rewriter.replaceOp(castOp, converted);
+        return success();
+      }
+      rewriter.replaceOp(castOp, input);
+      return success();
+    }
+
+    // Integer conversions
+    auto inputIntTy = dyn_cast<IntegerType>(inputType);
+    auto outputIntTy = dyn_cast<IntegerType>(outputType);
+    
+    if (inputIntTy && outputIntTy) {
+      if (inputIntTy.getWidth() < outputIntTy.getWidth()) {
+        Value converted = rewriter.create<LLVM::ZExtOp>(loc, outputType, input);
+        rewriter.replaceOp(castOp, converted);
+        return success();
+      } else if (inputIntTy.getWidth() > outputIntTy.getWidth()) {
+        Value converted = rewriter.create<LLVM::TruncOp>(loc, outputType, input);
+        rewriter.replaceOp(castOp, converted);
+        return success();
+      }
+      rewriter.replaceOp(castOp, input);
+      return success();
+    }
+
+    // Int to pointer
+    if (inputIntTy && outputPtrTy) {
+      Value converted = rewriter.create<LLVM::IntToPtrOp>(loc, outputType, input);
+      rewriter.replaceOp(castOp, converted);
+      return success();
+    }
+
+    // Pointer to int
+    if (inputPtrTy && outputIntTy) {
+      Value converted = rewriter.create<LLVM::PtrToIntOp>(loc, outputType, input);
+      rewriter.replaceOp(castOp, converted);
+      return success();
+    }
+
+    // Only allow LLVM-to-LLVM bitcast
+    if (inputType.getDialect().getNamespace() == "llvm" &&
+        outputType.getDialect().getNamespace() == "llvm") {
+      Value converted = rewriter.create<LLVM::BitcastOp>(loc, outputType, input);
+      rewriter.replaceOp(castOp, converted);
+      return success();
+    }
+
+    llvm::errs() << "ERROR: Cannot convert between incompatible types:\n";
+    llvm::errs() << "  From: " << inputType << "\n";
+    llvm::errs() << "  To: " << outputType << "\n";
+    
+    return failure(); // Fail conversion for truly incompatible types
+  }
+};
 } // end anonymous namespace
 
 //===----------------------------------------------------------------------===//
@@ -740,11 +966,21 @@ void mlir::triton::populateStripGPUAndSetX86(
 
   patterns.add<StripGPUAttrsInModule>(ctx);
   patterns.add<StripGPUAttrsInFunc>(ctx);
+  
   patterns.add<ConvertReadTidX>(ctx);
   patterns.add<ConvertReadTidY>(ctx);
   patterns.add<ConvertReadTidZ>(ctx);
   patterns.add<ConvertClusterId>(ctx);
   patterns.add<ConvertBarrier0Op>(ctx);
+  patterns.add<ConvertShflOp>(ctx);
   patterns.add<ConvertGlobalInline>(ctx);
   patterns.add<ConvertMetricsAlloca>(ctx);
+}
+
+void mlir::triton::populateStripGPUAndSetX86CleanUp(
+    LLVMTypeConverter & typeConverter,
+    RewritePatternSet &patterns,
+    const TargetInfoBase & targetInfo) {
+  MLIRContext *ctx = patterns.getContext();
+  patterns.add<ConvertUnrealizedConversionCast>(ctx);
 }

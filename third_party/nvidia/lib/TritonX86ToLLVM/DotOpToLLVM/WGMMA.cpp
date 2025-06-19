@@ -23,6 +23,7 @@
 
 #include "Utility.h"
 #include "mlir/Support/LLVM.h"
+#include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 
 using namespace mlir;
 using namespace mlir::triton;
@@ -34,6 +35,7 @@ using ::mlir::triton::gpu::NvidiaMmaEncodingAttr;
 using ::mlir::triton::gpu::SharedEncodingAttr;
 using ::mlir::triton::gpu::MetricId;
 using ::mlir::triton::gpu::incrementMetric;
+using ::mlir::triton::gpu::replaceOpWithDummyPacked;
 
 triton::nvgpu::WGMMAEltType getMmaRetType(Value d) {
   auto dTy = cast<RankedTensorType>(d.getType()).getElementType();
@@ -487,22 +489,33 @@ LogicalResult convertDot(const LLVMTypeConverter *typeConverter,
       }
     }
   }
-  rewriter.create<triton::nvgpu::WGMMACommitGroupOp>(loc);
-
+  
   incrementMetric(rewriter, metricAlloca, loc, static_cast<unsigned>(MetricId::WGMMA), cnt);
-
-  if (sync)
-    mmaResults = emitWait(rewriter, loc, mmaResults, 0);
 
   SmallVector<Value> results =
       unpackAccumulator(rewriter, loc, mmaResults, dTensorTy);
-
-  // replace with new packed result
+  
   Type structTy = LLVM::LLVMStructType::getLiteral(
       mmaEncoding.getContext(),
       SmallVector<Type>(results.size(), dTensorTy.getElementType()));
-  auto res = packLLElements(loc, typeConverter, results, rewriter, structTy);
-  rewriter.replaceOp(op, res);
+
+  replaceOpWithDummyPacked(rewriter, *typeConverter, op, results.size(), dTensorTy.getElementType(), structTy);
+  
+  return success();
+
+  // rewriter.create<triton::nvgpu::WGMMACommitGroupOp>(loc);
+  // if (sync)
+  //   mmaResults = emitWait(rewriter, loc, mmaResults, 0);
+
+  // SmallVector<Value> results =
+  //     unpackAccumulator(rewriter, loc, mmaResults, dTensorTy);
+
+  // // replace with new packed result
+  // Type structTy = LLVM::LLVMStructType::getLiteral(
+  //     mmaEncoding.getContext(),
+  //     SmallVector<Type>(results.size(), dTensorTy.getElementType()));
+  // auto res = packLLElements(loc, typeConverter, results, rewriter, structTy);
+  // rewriter.replaceOp(op, res);
   return success();
 }
 

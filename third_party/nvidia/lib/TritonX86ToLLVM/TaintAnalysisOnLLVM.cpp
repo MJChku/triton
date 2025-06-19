@@ -179,7 +179,10 @@ private:
     module.walk([&](LLVM::CallOp callOp) {
       if (callOp.getCallee()) {
         StringRef calleeName = *callOp.getCallee();
-        if (calleeName.contains("metrics_dummy")) {
+        if (calleeName.contains("metrics_dummy")
+          || calleeName.contains("undef")
+          || calleeName.contains("unrealized_conversion_cast")
+          ) {
           
           for (Value result : callOp.getResults()) {
             markValueAsTainted(result);
@@ -210,7 +213,7 @@ private:
         }
       }
     });
-    
+
     // Propagate taint through operations
     bool changed = true;
     while (changed) {
@@ -347,6 +350,207 @@ private:
     }
   }
 
+  void insertMemoryAccessAssertions() {
+    ModuleOp module = getOperation();
+    auto *ctx = &getContext();
+    
+    OpBuilder builder(ctx);
+    builder.setInsertionPointToStart(module.getBody());
+    
+    auto voidTy = LLVM::LLVMVoidType::get(ctx);
+    auto ptrTy = LLVM::LLVMPointerType::get(ctx, /*addrSpace=*/0);
+    auto assertFnTy = LLVM::LLVMFunctionType::get(voidTy, /*params=*/{ptrTy}, /*isVarArg=*/false);
+    
+    // Create assertion function for memory access failures
+    if (!module.lookupSymbol<LLVM::LLVMFuncOp>("memory_assertion_failure")) {
+      auto assertStub = builder.create<LLVM::LLVMFuncOp>(
+          module.getLoc(), "memory_assertion_failure", assertFnTy);
+      assertStub.setLinkage(LLVM::Linkage::External);
+    }
+    
+    int unsafeMemoryOps = 0;
+    
+    // Check LLVM::LoadOp for tainted addresses
+    module.walk([&](LLVM::LoadOp loadOp) {
+      Value addr = loadOp.getAddr();
+      
+      // Check if the address depends on tainted data
+      if (dependsOnTaintedData(addr)) {
+        unsafeMemoryOps++;
+        Location loc = loadOp.getLoc();
+        
+        std::string errorMsg = "Load " + std::to_string(unsafeMemoryOps) + 
+                              " from address computed using dummy/tainted data - potential segfault";
+        
+        insertMemoryAssertion(builder, module, loc, errorMsg, unsafeMemoryOps, loadOp);
+        
+        llvm::errs() << "WARNING: Inserted assertion for potentially unsafe load at " 
+                     << loc << "\n";
+      }
+    });
+    
+    // Check LLVM::StoreOp for tainted addresses  
+    module.walk([&](LLVM::StoreOp storeOp) {
+      Value addr = storeOp.getAddr();
+      
+      if (dependsOnTaintedData(addr)) {
+        unsafeMemoryOps++;
+        Location loc = storeOp.getLoc();
+        
+        std::string errorMsg = "Store " + std::to_string(unsafeMemoryOps) + 
+                              " to address computed using dummy/tainted data - potential segfault";
+        
+        insertMemoryAssertion(builder, module, loc, errorMsg, unsafeMemoryOps, storeOp);
+        
+        llvm::errs() << "WARNING: Inserted assertion for potentially unsafe store at " 
+                     << loc << "\n";
+      }
+    });
+    
+    // Check LLVM::GEPOp for tainted indices
+    module.walk([&](LLVM::GEPOp gepOp) {
+      Value basePtr = gepOp.getBase();
+      auto indices = gepOp.getIndices();
+      
+      // Check for tainted base pointer
+      bool hasTaintedBase = dependsOnTaintedData(basePtr);
+      
+      // Check each index for taint
+      bool hasTaintedIndex = false;
+      for (auto [i, index] : llvm::enumerate(indices)) {
+        if (auto valueIndex = dyn_cast<Value>(index)) {
+          if (dependsOnTaintedData(valueIndex)) {
+            hasTaintedIndex = true;
+            llvm::errs() << "WARNING: GEP using tainted index " << i << "\n";
+            
+            if (indices.size() > 1) {
+              llvm::errs() << "  Multi-dimensional array access with tainted index!\n";
+            }
+          }
+        }
+      }
+      
+      if (hasTaintedBase || hasTaintedIndex) {
+        unsafeMemoryOps++;
+        Location loc = gepOp.getLoc();
+        
+        std::string errorMsg = "GEP " + std::to_string(unsafeMemoryOps);
+        if (hasTaintedBase && hasTaintedIndex) {
+          errorMsg += " with both tainted base pointer and indices - potential out-of-bounds access";
+        } else if (hasTaintedBase) {
+          errorMsg += " with tainted base pointer - potential invalid memory access";  
+        } else {
+          errorMsg += " with tainted indices - potential out-of-bounds access";
+        }
+        
+        // Add extra warning for multi-dimensional access
+        if (indices.size() > 1) {
+          errorMsg += " (multi-dimensional array)";
+        }
+        
+        insertMemoryAssertion(builder, module, loc, errorMsg, unsafeMemoryOps, gepOp);
+        
+        llvm::errs() << "WARNING: Inserted assertion for potentially unsafe GEP at " 
+                    << loc << "\n";
+      }
+    });
+    // Check memcpy/memmove operations
+    module.walk([&](LLVM::CallOp callOp) {
+      if (callOp.getCallee()) {
+        StringRef calleeName = *callOp.getCallee();
+        if (calleeName.contains("memcpy") || calleeName.contains("memmove") || 
+            calleeName.contains("memset")) {
+          
+          // Check source and destination addresses
+          auto operands = callOp.getOperands();
+          if (operands.size() >= 2) {
+            Value dest = operands[0];
+            Value src = (operands.size() > 1) ? operands[1] : Value{};
+            
+            if (dependsOnTaintedData(dest) || (src && dependsOnTaintedData(src))) {
+              unsafeMemoryOps++;
+              Location loc = callOp.getLoc();
+              
+              std::string errorMsg = "Memory operation " + calleeName.str() + " " + 
+                                    std::to_string(unsafeMemoryOps) + 
+                                    " with tainted addresses - potential segfault";
+              
+              insertMemoryAssertion(builder, module, loc, errorMsg, unsafeMemoryOps, callOp);
+              
+              llvm::errs() << "WARNING: Inserted assertion for potentially unsafe " 
+                           << calleeName << " at " << loc << "\n";
+            }
+          }
+        }
+      }
+    });
+    
+    if (unsafeMemoryOps > 0) {
+      llvm::errs() << "TAINT ANALYSIS: Found " << unsafeMemoryOps 
+                   << " potentially unsafe memory operations\n";
+    } else {
+      llvm::errs() << "TAINT ANALYSIS: No unsafe memory operations found\n";
+    }
+  }
+
+  // Helper method to insert memory assertion
+  void insertMemoryAssertion(OpBuilder &builder, ModuleOp module, Location loc, 
+                            const std::string &errorMsg, int errorId, Operation *beforeOp) {
+    auto ptrTy = LLVM::LLVMPointerType::get(&getContext(), /*addrSpace=*/0);
+    
+    // Create global string for error message
+    auto savedInsertionPoint = builder.saveInsertionPoint();
+    builder.setInsertionPointToStart(module.getBody());
+    
+    auto stringTy = LLVM::LLVMArrayType::get(builder.getI8Type(), errorMsg.length() + 1);
+    auto errorGlobal = builder.create<LLVM::GlobalOp>(
+        loc, stringTy, /*isConstant=*/true, LLVM::Linkage::Private,
+        "memory_error_" + std::to_string(errorId),
+        builder.getStringAttr(errorMsg + '\0'));
+    
+    builder.restoreInsertionPoint(savedInsertionPoint);
+    
+    // Insert assertion call before the potentially unsafe memory operation
+    builder.setInsertionPoint(beforeOp);
+    
+    auto errorPtr = builder.create<LLVM::AddressOfOp>(loc, ptrTy, errorGlobal.getSymName());
+    
+    // Create assertion call
+    builder.create<LLVM::CallOp>(
+        loc, /*resultTypes=*/TypeRange{},
+        /*callee=*/builder.getStringAttr("memory_assertion_failure"),
+        /*args=*/ValueRange{errorPtr});
+  }
+
+void detectTaintedArrayAccess() {
+  ModuleOp module = getOperation();
+  
+  // Look for patterns like: base_ptr + tainted_index * element_size
+  module.walk([&](LLVM::GEPOp gepOp) {
+    Value basePtr = gepOp.getBase();
+    auto indices = gepOp.getIndices();
+    
+    // Check for tainted base pointer
+    if (dependsOnTaintedData(basePtr)) {
+      llvm::errs() << "WARNING: GEP using tainted base pointer\n";
+    }
+    
+    // Check each index for taint
+    for (auto [i, index] : llvm::enumerate(indices)) {
+      if (auto valueIndex = dyn_cast<Value>(index)) {
+        if (dependsOnTaintedData(valueIndex)) {
+          llvm::errs() << "WARNING: GEP using tainted index " << i << "\n";
+          
+          // This is especially dangerous for multi-dimensional array access
+          if (indices.size() > 1) {
+            llvm::errs() << "  Multi-dimensional array access with tainted index!\n";
+          }
+        }
+      }
+    }
+  });
+}
+
 public:
   void runOnOperation() override {
     llvm::errs() << "Running Taint Analysis on LLVM\n";
@@ -359,6 +563,9 @@ public:
     
     // Step 2: Insert branch assertions
     insertBranchAssertions();
+    
+    // Step 3: Insert memory access assertions
+    insertMemoryAccessAssertions();
     
     llvm::errs() << "Taint Analysis completed. Total tainted values: " 
                  << taintedValues.size() << "\n";
