@@ -10,8 +10,7 @@
 
 using namespace mlir::triton::gpu;
 using ::mlir::triton::gpu::createDummyValue;
-using ::mlir::triton::gpu::incrementMetric;
-using ::mlir::triton::gpu::ensureMetricsAlloc;
+using ::mlir::triton::gpu::MetricsRecorder;
 
 namespace mlir::triton {
 
@@ -247,13 +246,12 @@ typedef std::function<SmallVector<Value>(Location, ConversionPatternRewriter &,
 static ConverterT makeConverterFromPtx(const std::string &ptxAsm, Type inType,
                                        Type outType,
                                        const LLVMTypeConverter* typeConverter,
-                                       Value metricsAlloca,
                                        const int inVecWidthBits = 32,
                                        const int outVecWidthBits = 32) {
 
   ConverterT converter =
       [ptxAsm, inType, outType, 
-       typeConverter, metricsAlloca, 
+       typeConverter,
        inVecWidthBits,
        outVecWidthBits](Location loc, ConversionPatternRewriter &rewriter,
                         const SmallVector<Value> &v) -> SmallVector<Value> {
@@ -271,8 +269,6 @@ static ConverterT makeConverterFromPtx(const std::string &ptxAsm, Type inType,
     //   ) {
     //   llvm::errs() << "Seeing ptx conversion for: " << ptxAsm << "\n";
     // }
-
-    incrementMetric(rewriter, metricsAlloca, loc, 1, 1);
 
     // auto ctx = rewriter.getContext();
     // int inBitwidth = inType.getIntOrFloatBitWidth();
@@ -352,13 +348,18 @@ struct FpToFpOpConversion
     return builder.launch(rewriter, loc, f32_ty, false);
   }
 
-  static Value convertFp16ToFp32(Location loc,
+  static Value convertFp16ToFp32(Operation *op, Location loc,
                                  ConversionPatternRewriter &rewriter,
                                  const LLVMTypeConverter& typeConverter,
-                                 Value metricsAlloca,
                                  const Value &v) {
-  
-    incrementMetric(rewriter, metricsAlloca, loc, 0, 1);
+    int slot = 0;
+    MetricsRecorder metrics(
+      "triton.metrics.elementwise",
+      10,
+      rewriter, 
+      op->getLoc());
+    metrics.increment(slot);
+
     return createDummyValue(
           rewriter, loc, f32_ty, 1);
 
@@ -370,24 +371,34 @@ struct FpToFpOpConversion
     return builder.launch(rewriter, loc, f32_ty, false);
   }
 
-  static Value convertFp32ToBf16(Location loc,
+  static Value convertFp32ToBf16(Operation *op, Location loc,
                                  ConversionPatternRewriter &rewriter,
                                  const LLVMTypeConverter& typeConverter,
-                                 Value metricsAlloca,
                                  const Value &v, const RoundingMode rounding) {
+    int slot = 0;
+    MetricsRecorder metrics(
+      "triton.metrics.elementwise",
+      10,
+      rewriter, 
+      op->getLoc());
+    metrics.increment(slot);
 
-    incrementMetric(rewriter, metricsAlloca, loc, 0, 1);
     return createDummyValue(
           rewriter, loc, f16_ty, 1);
   }
 
-  static Value convertFp32ToFp16(Location loc,
+  static Value convertFp32ToFp16(Operation *op, Location loc,
                                  ConversionPatternRewriter &rewriter,
                                  const LLVMTypeConverter& typeConverter,
-                                 Value metricsAlloca,
                                  const Value &v, const RoundingMode rounding) {
+    int slot = 0;
+    MetricsRecorder metrics(
+      "triton.metrics.elementwise",
+      10,
+      rewriter, 
+       op->getLoc());
+    metrics.increment(slot);
     
-    incrementMetric(rewriter, metricsAlloca, loc, 0, 1);
     return createDummyValue(rewriter, loc, f16_ty, 1);
 
     PTXBuilder builder;
@@ -470,7 +481,6 @@ struct FpToFpOpConversion
                 convDesc.ptx, getTypeConverter()->convertType(srcTy),
                 getTypeConverter()->convertType(dstTy), 
                 getTypeConverter(),
-                metricsAlloca,
                 convDesc.inVecWidthBits,
                 convDesc.outVecWidthBits),
             convDesc.numElements};
@@ -504,7 +514,7 @@ struct FpToFpOpConversion
       SmallVector<Value> outVals;
       for (Value v : operands[0]) {
         outVals.push_back(
-            convertFp32ToFp16(loc, rewriter,  *getTypeConverter(), metricsAlloca, v, roundingMode.value()));
+            convertFp32ToFp16(op, loc, rewriter,  *getTypeConverter(), v, roundingMode.value()));
       }
       return outVals;
     }
@@ -515,8 +525,8 @@ struct FpToFpOpConversion
       SmallVector<Value> outVals;
       for (Value v : operands[0]) {
         outVals.push_back(
-            convertFp32ToBf16(loc, rewriter, 
-              *getTypeConverter(), metricsAlloca,
+            convertFp32ToBf16(op, loc, rewriter, 
+              *getTypeConverter(),
               v, roundingMode.value()));
        
       }
@@ -539,7 +549,7 @@ struct FpToFpOpConversion
     }
     if (useFP16IntermediateSrc)
       for (Value &v : inVals){
-        v = convertFp32ToFp16(loc, rewriter, *getTypeConverter(), metricsAlloca, v, RoundingMode::RTZ);
+        v = convertFp32ToFp16(op, loc, rewriter, *getTypeConverter(), v, RoundingMode::RTZ);
       }
     inVals.resize(numElements, undef(typeConverter->convertType(srcType)));
     SmallVector<Value> outVals = cvtFunc(loc, rewriter, inVals);
@@ -547,7 +557,7 @@ struct FpToFpOpConversion
     outVals.resize(std::min(numElements, operands.size()));
     if (isDstFP32)
       for (Value &v : outVals){
-        v = convertFp16ToFp32(loc, rewriter,  *getTypeConverter(), metricsAlloca, v);
+        v = convertFp16ToFp32(op, loc, rewriter,  *getTypeConverter(), v);
       }
     // Pack values
     return outVals;
@@ -603,8 +613,14 @@ struct FMulOpConversion
     auto lhsElemTy = getElementType(op.getLhs());
     auto rhsElemTy = getElementType(op.getRhs());
     
-    incrementMetric(rewriter, metricsAlloca, loc, 2, 1);
-    
+    int slot = 3;
+    MetricsRecorder metrics(
+      "triton.metrics.elementwise",
+      10,
+      rewriter, 
+       op->getLoc());
+    metrics.increment(slot);
+
     if (lhsElemTy.isBF16() && rhsElemTy.isBF16()) {
     
       return {createDummyValue(rewriter, loc, lhsElemTy, 1)};
@@ -636,11 +652,18 @@ struct FAddOpConversion
                                    ConversionPatternRewriter &rewriter,
                                    Type elemTy, MultipleOperandsRange operands,
                                    Location loc) const {
+    
+    int slot = 2;
+    MetricsRecorder metrics(
+      "triton.metrics.elementwise",
+      10,
+      rewriter, 
+       op.getLoc());
+    metrics.increment(slot);
+
     auto lhsElemTy = getElementType(op.getLhs());
     auto rhsElemTy = getElementType(op.getRhs());
     
-    incrementMetric(rewriter, metricsAlloca, loc, 2, 1);
-
     if (lhsElemTy.isBF16() && rhsElemTy.isBF16()) {
       return {createDummyValue(rewriter, loc, lhsElemTy, 1)};
       
@@ -673,7 +696,14 @@ struct FSubOpConversion
                                    Location loc) const {
     auto lhsElemTy = getElementType(op.getLhs());
     auto rhsElemTy = getElementType(op.getRhs());
-    incrementMetric(rewriter, metricsAlloca, loc, 2, 1);
+    
+    int slot = 2;
+    MetricsRecorder metrics(
+      "triton.metrics.elementwise",
+      10,
+      rewriter, 
+       op.getLoc());
+    metrics.increment(slot);
 
     if (lhsElemTy.isBF16() && rhsElemTy.isBF16()) {
       return {createDummyValue(rewriter, loc, lhsElemTy, 1)};
@@ -706,13 +736,23 @@ struct SIToFPOpConversion
                                    ConversionPatternRewriter &rewriter,
                                    Type elemTy, MultipleOperandsRange operands,
                                    Location loc) const {
+
+    int slot = 0;
+    MetricsRecorder metrics(
+      "triton.metrics.elementwise",
+      10,
+      rewriter, 
+       op.getLoc());
+    metrics.increment(slot);
+
+
     Type inElemTy = getElementType(op.getIn());
     Type outElemTy = getElementType(op.getOut());
     if (outElemTy.isBF16() && inElemTy.isInteger(8) && operands.size() >= 4) {
       auto cvtFunc = makeConverterFromPtx(
           S8_to_Bf16, getTypeConverter()->convertType(inElemTy),
           getTypeConverter()->convertType(outElemTy), 
-          getTypeConverter(), metricsAlloca
+          getTypeConverter()
         );
       SmallVector<Value> inVals = {operands[0][0], operands[1][0],
                                    operands[2][0], operands[3][0]};
@@ -721,8 +761,8 @@ struct SIToFPOpConversion
       return outVals;
     } else if (outElemTy.isBF16()) {
       auto value = rewriter.create<LLVM::SIToFPOp>(loc, f32_ty, operands[0][0]);
-      return {FpToFpOpConversion::convertFp32ToBf16(loc, rewriter,
-                                                  *getTypeConverter(), metricsAlloca,                                             
+      return {FpToFpOpConversion::convertFp32ToBf16(op, loc, rewriter,
+                                                  *getTypeConverter(),                                             
                                                   value,
                                                     RoundingMode::RTNE)};
     } else {
@@ -741,6 +781,15 @@ struct FPToSIOpConversion
                                    ConversionPatternRewriter &rewriter,
                                    Type elemTy, MultipleOperandsRange operands,
                                    Location loc) const {
+    int slot = 0;
+    MetricsRecorder metrics(
+      "triton.metrics.elementwise",
+      10,
+      rewriter, 
+       op.getLoc());
+    metrics.increment(slot);
+
+
     auto inElemTy = getElementType(op.getIn());
     if (inElemTy.isBF16()) {
       auto value =
@@ -762,6 +811,15 @@ struct ExtFOpConversion
                                    ConversionPatternRewriter &rewriter,
                                    Type elemTy, MultipleOperandsRange operands,
                                    Location loc) const {
+    int slot = 0;
+    MetricsRecorder metrics(
+      "triton.metrics.elementwise",
+      10,
+      rewriter, 
+       op.getLoc());
+    metrics.increment(slot);
+
+
     auto inElemTy = getElementType(op.getIn());
     if (inElemTy.isBF16()) {
       auto outElemTy = getElementType(op.getOut());
@@ -784,13 +842,21 @@ struct TruncFOpConversion
                                    ConversionPatternRewriter &rewriter,
                                    Type elemTy, MultipleOperandsRange operands,
                                    Location loc) const {
+    int slot = 0;
+    MetricsRecorder metrics(
+      "triton.metrics.elementwise",
+      10,
+      rewriter, 
+      op.getLoc());
+    metrics.increment(slot);
+
     auto outElemTy = getElementType(op.getOut());
     if (outElemTy.isBF16()) {
       auto inElemTy = getElementType(op.getIn());
       assert(inElemTy.isF32() && "unsupported conversion");
       return {// Trunc uses the default rounding mode: RTNE
-              FpToFpOpConversion::convertFp32ToBf16(
-                  loc, rewriter, *getTypeConverter(), metricsAlloca, operands[0][0], RoundingMode::RTNE)};
+              FpToFpOpConversion::convertFp32ToBf16(op, 
+                  loc, rewriter, *getTypeConverter(), operands[0][0], RoundingMode::RTNE)};
     } else {
       return {rewriter.create<LLVM::FPTruncOp>(loc, elemTy, operands[0][0])};
     }
@@ -807,6 +873,14 @@ struct ExpOpConversionApprox
                                    ConversionPatternRewriter &rewriter,
                                    Type elemTy, MultipleOperandsRange operands,
                                    Location loc) const {
+    int slot = 4;
+    MetricsRecorder metrics(
+      "triton.metrics.elementwise",
+      10,
+      rewriter, 
+      op.getLoc());
+    metrics.increment(slot);
+
     // For non-FP32 input, call __nv_expf for higher-precision calculation
     if (elemTy.getIntOrFloatBitWidth() != 32)
       return {};
@@ -912,6 +986,14 @@ struct ClampFOpConversion
       inType = "h";
     }
 
+    int slot = 5;
+    MetricsRecorder metrics(
+      "triton.metrics.elementwise",
+      10,
+      rewriter, 
+      op.getLoc());
+    metrics.increment(slot);
+
     return {createDummyValue(
         rewriter, loc, elemTy, 1)};
 
@@ -958,6 +1040,20 @@ struct OpToExternCallConversion
                                    ConversionPatternRewriter &rewriter,
                                    Type elemTy, MultipleOperandsRange operands,
                                    Location loc) const {
+    int slot = 6;
+    if(funcName == "__nv_fsqrt_rn" ) {
+      slot = 6;
+    }else if(funcName == "__nv_fdiv_rn") {
+      slot = 7;
+    } 
+
+    MetricsRecorder metrics(
+      "triton.metrics.elementwise",
+      10,
+      rewriter, 
+      op.getLoc());
+    metrics.increment(slot);
+
     Type funcType = getFunctionType(elemTy, operands[0]);
     LLVM::LLVMFuncOp funcOp =
         appendOrGetExternFuncOp(rewriter, op, funcName, funcType);

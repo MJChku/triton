@@ -5,6 +5,7 @@
 #include "mlir/Dialect/LLVMIR/NVVMDialect.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/Value.h"
+#include "mlir/Support/LogicalResult.h"
 #include "triton/Analysis/Allocation.h"
 #include "triton/Conversion/TritonGPUToLLVM/PatternTritonGPUOpToLLVM.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
@@ -24,24 +25,24 @@ using ::mlir::triton::gpu::getSizePerThread;
 using ::mlir::triton::gpu::getTotalElemsPerThread;
 using ::mlir::triton::gpu::isaDistributedLayout;
 using ::mlir::triton::gpu::SharedEncodingAttr;
-
+using ::mlir::triton::gpu::replaceOpWithDummyPacked;
 // Forward declarations
 
 namespace SharedToDotOperandMMAv1 {
 
-Value convertLayout(int opIdx, Value tensor, const SharedMemoryObject &smemObj,
+Value convertLayout(Operation *op, int opIdx, Value tensor, const SharedMemoryObject &smemObj,
                     Value thread, Location loc,
                     const LLVMTypeConverter *typeConverter,
-                    ConversionPatternRewriter &rewriter, Type resultTy, Value metricAlloca);
+                    ConversionPatternRewriter &rewriter, Type resultTy);
 
 } // namespace SharedToDotOperandMMAv1
 
 namespace SharedToDotOperandMMAv2 {
-Value convertLayout(int opIdx, ConversionPatternRewriter &rewriter,
+Value convertLayout(Operation *op, int opIdx, ConversionPatternRewriter &rewriter,
                     Location loc, Value tensor,
                     DotOperandEncodingAttr bEncoding,
                     const SharedMemoryObject &smemObj,
-                    const LLVMTypeConverter *typeConverter, Value thread, Value metricAlloca);
+                    const LLVMTypeConverter *typeConverter, Value thread);
 }
 
 namespace {
@@ -70,8 +71,6 @@ public:
     }
     return failure();
   }
-public:
-  mutable Value metricAlloca;
 
 private:
   // shared -> dot_operand if the result layout is mma
@@ -81,8 +80,7 @@ private:
       ConversionPatternRewriter &rewriter,
       const NvidiaMmaEncodingAttr &mmaLayout,
       const DotOperandEncodingAttr &dotOperandLayout, bool isOuter) const {
-    
-    metricAlloca = ensureMetricsAlloc("triton.metrics.localloadop", 1, rewriter, *typeConverter,  op->getParentOfType<LLVM::LLVMFuncOp>(), op.getLoc());
+
     auto loc = op.getLoc();
     auto src = op.getSrc();
     auto dst = op.getResult();
@@ -96,8 +94,9 @@ private:
     Value res;
     if (!isOuter && mmaLayout.isAmpere()) { // tensor core v2
       res = SharedToDotOperandMMAv2::convertLayout(
+          op,
           dotOperandLayout.getOpIdx(), rewriter, loc, src, dotOperandLayout,
-          smemObj, typeConverter, getThreadId(rewriter, loc), metricAlloca);
+          smemObj, typeConverter, getThreadId(rewriter, loc));
     } else if (!isOuter && mmaLayout.isVolta() && isMMA) { // tensor core v1
       bool isMMAv1Row = mmaLayout.getMMAv1IsRow(dotOperandLayout.getOpIdx());
       auto srcSharedLayout =
@@ -111,8 +110,9 @@ private:
       }
 
       res = SharedToDotOperandMMAv1::convertLayout(
+          op,
           dotOperandLayout.getOpIdx(), src, smemObj, getThreadId(rewriter, loc),
-          loc, typeConverter, rewriter, dst.getType(), metricAlloca);
+          loc, typeConverter, rewriter, dst.getType());
     } else {
       assert(false && "Unsupported mma layout found");
     }
@@ -161,6 +161,9 @@ public:
     if (isa<NvidiaMmaEncodingAttr>(srcLayout) &&
         isa<NvidiaMmaEncodingAttr>(dstLayout)) {
       if (isMmaToMmaShortcut(srcTy, dstTy)) {
+        MetricsRecorder metrics(
+            "triton.metrics.layoutOp", 10, rewriter, op.getLoc());
+        metrics.increment(4);
         return lowerMmaToMma(op, adaptor, rewriter);
       }
     }
@@ -436,6 +439,11 @@ private:
   lowerDistToDistWithDistSmem(triton::gpu::ConvertLayoutOp op,
                               OpAdaptor adaptor,
                               ConversionPatternRewriter &rewriter) const {
+
+    int slot = 6;
+    MetricsRecorder metrics(
+            "triton.metrics.layoutOp", 10, rewriter, op.getLoc());
+
     auto loc = op.getLoc();
     auto typeConverter = getTypeConverter();
     auto srcTy = op.getSrc().getType();
@@ -472,8 +480,8 @@ private:
     }
 
     // Cluster barrier
-    rewriter.create<triton::nvidia_gpu::ClusterArriveOp>(loc, false);
-    rewriter.create<triton::nvidia_gpu::ClusterWaitOp>(loc);
+    // rewriter.create<triton::nvidia_gpu::ClusterArriveOp>(loc, false);
+    // rewriter.create<triton::nvidia_gpu::ClusterWaitOp>(loc);
 
     // Load from remote shared memory
     {
@@ -503,14 +511,15 @@ private:
         outVals.push_back(load_dsmem(ptr, remoteCTAId, llvmElemTy));
       }
 
-      Value result =
-          packLLElements(loc, typeConverter, outVals, rewriter, dstTy);
+      Value result = packLLElements(loc, typeConverter, outVals, rewriter, dstTy);
       rewriter.replaceOp(op, result);
+      // metrics.incrementBy(slot, 1);
+      // replaceOpWithDummyPacked(rewriter, *typeConverter, op, outVals.size(), outVals[0].getType(), dstTy);
     }
 
     // Cluster barrier
-    rewriter.create<triton::nvidia_gpu::ClusterArriveOp>(loc, false);
-    rewriter.create<triton::nvidia_gpu::ClusterWaitOp>(loc);
+    // rewriter.create<triton::nvidia_gpu::ClusterArriveOp>(loc, false);
+    // rewriter.create<triton::nvidia_gpu::ClusterWaitOp>(loc);
 
     return success();
   }
@@ -521,6 +530,11 @@ private:
   lowerDistributedToDistributed(triton::gpu::ConvertLayoutOp op,
                                 OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const {
+
+    int slot = 7;
+    MetricsRecorder metrics(
+            "triton.metrics.layoutOp", 10, rewriter, op.getLoc());
+
     auto loc = op.getLoc();
     auto typeConverter = getTypeConverter();
     RankedTensorType srcTy = op.getSrc().getType();
@@ -598,7 +612,8 @@ private:
 
     Value result = packLLElements(loc, typeConverter, outVals, rewriter, dstTy);
     rewriter.replaceOp(op, result);
-
+    // metrics.incrementBy(slot, accumNumReplicates);
+    // replaceOpWithDummyPacked(rewriter, *typeConverter, op, outVals.size(), outVals[0].getType(), dstTy);
     return success();
   }
 
@@ -609,9 +624,22 @@ private:
   convertMMAV3To8BitsDotOperand(triton::gpu::ConvertLayoutOp op,
                                 OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const {
+   
+
     auto loc = op.getLoc();
     auto dstTy = op.getType();
     auto vals = unpackLLElements(loc, adaptor.getSrc(), rewriter);
+
+    int slot = 8;
+    MetricsRecorder metrics(
+            "triton.metrics.layoutOp", 10, rewriter, op.getLoc());
+    for (int i = 0; i < vals.size(); i += 8) {
+      metrics.increment(slot);
+    }
+    
+    replaceOpWithDummyPacked(rewriter, *getTypeConverter(), op, dstTy.getNumElements(), dstTy.getElementType(), dstTy);
+    return;
+
     SmallVector<Value> retVals;
     for (int i = 0; i < vals.size(); i += 8) {
       Value upper = undef(vec_ty(i8_ty, 4));
@@ -663,6 +691,8 @@ private:
                                         clamp, NVVM::ShflKind::idx, UnitAttr());
       Value upper1 =
           LLVM::NVIDIA::permute(loc, rewriter, upper0, lower0, selectorEx4);
+
+
       Value vecVal = bitcast(upper1, vec_ty(i8_ty, 4));
       for (int i = 0; i < 4; i++) {
         retVals.push_back(extract_element(i8_ty, vecVal, i32_val(i)));
@@ -697,10 +727,19 @@ private:
       return success();
     }
 
+    
     if (isMmaToDotShortcut(srcTy, dstTy)) {
+
+      int slot = 9;
+      MetricsRecorder metrics(
+            "triton.metrics.layoutOp", 10, rewriter, op.getLoc());
+
       // get source values
       auto vals = unpackLLElements(loc, adaptor.getSrc(), rewriter);
       unsigned elems = getTotalElemsPerThread(srcTy);
+
+      metrics.incrementBy(slot, elems);
+
       Type elemTy =
           this->getTypeConverter()->convertType(srcTy.getElementType());
       // for the destination type, we need to pack values together

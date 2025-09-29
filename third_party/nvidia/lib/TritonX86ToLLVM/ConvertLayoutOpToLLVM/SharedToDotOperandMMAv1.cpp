@@ -13,11 +13,8 @@ using ::mlir::triton::gpu::getSizePerThread;
 using ::mlir::triton::gpu::getTotalElemsPerThread;
 using ::mlir::triton::gpu::isaDistributedLayout;
 using ::mlir::triton::gpu::SharedEncodingAttr;
-
-using ::mlir::triton::gpu::incrementMetric;
-using ::mlir::triton::gpu::ensureMetricsAlloc;
 using ::mlir::triton::gpu::createDummyValue;
-
+using ::mlir::triton::gpu::MetricsRecorder;
 
 // Compute the offset of the matrix to load.
 // Returns offsetAM, offsetAK, offsetBN, offsetBK.
@@ -92,10 +89,16 @@ computeOffsets(Value threadId, bool isARow, bool isBRow, ArrayRef<int> fpw,
   return std::make_tuple(offsetAM, offsetAK, offsetBN, offsetBK);
 }
 
-static Value loadA(Value tensor, const SharedMemoryObject &smemObj,
+static Value loadA(
+                  Operation *op, 
+                  Value tensor, const SharedMemoryObject &smemObj,
                    Value thread, Location loc,
                    const LLVMTypeConverter *typeConverter,
-                   ConversionPatternRewriter &rewriter, Type resultTy, Value metricAlloca) {
+                   ConversionPatternRewriter &rewriter, Type resultTy, int slot) {
+    
+  MetricsRecorder metrics(
+      "triton.metrics.layoutOp", 10, rewriter, op->getLoc());
+      
   static constexpr std::array<int, 3> fpw{{2, 2, 1}};
   auto mmaEncoding = cast<NvidiaMmaEncodingAttr>(
       cast<DotOperandEncodingAttr>(
@@ -185,16 +188,19 @@ static Value loadA(Value tensor, const SharedMemoryObject &smemObj,
     // record lds that needs to be moved
     Value ha00 = bitcast(extract_element(ha, i32_val(0)), elemX2Ty);
     Value ha01 = bitcast(extract_element(ha, i32_val(1)), elemX2Ty);
+    int cnt = 0;
     ld(has, m, k, ha00, ha01);
-
+    cnt ++;
     if (vecA > 4) {
       Value ha10 = bitcast(extract_element(ha, i32_val(2)), elemX2Ty);
       Value ha11 = bitcast(extract_element(ha, i32_val(3)), elemX2Ty);
+      cnt ++;
       if (isARow)
         ld(has, m, k + 4, ha10, ha11);
       else
         ld(has, m + 1, k, ha10, ha11);
     }
+    return cnt;
   };
 
   bool isARow_ = mmaEncoding.getMMAv1IsRow(resultEncoding.getOpIdx());
@@ -206,11 +212,10 @@ static Value loadA(Value tensor, const SharedMemoryObject &smemObj,
   for (unsigned k = 0; k < NK; k += 4)
     for (unsigned m = 0; m < numM / 2; ++m)
       if (!has.count({m, k})){
-        loadA(m, k);
-        cnt++;
+        cnt += loadA(m, k);
       }
     
-  incrementMetric(rewriter, metricAlloca, loc, 0, cnt);
+  metrics.incrementBy(slot, cnt);
 
   SmallVector<Value> elems;
   elems.reserve(has.size() * 2);
@@ -227,11 +232,15 @@ static Value loadA(Value tensor, const SharedMemoryObject &smemObj,
   return res;
 }
 
-static Value loadB(Value tensor, const SharedMemoryObject &smemObj,
+static Value loadB(Operation *op, Value tensor, const SharedMemoryObject &smemObj,
                    Value thread, Location loc,
                    const LLVMTypeConverter *typeConverter,
-                   ConversionPatternRewriter &rewriter, Type resultTy, Value metricAlloca) {
-  static constexpr std::array<int, 3> fpw{{2, 2, 1}};
+                   ConversionPatternRewriter &rewriter, Type resultTy, int slot) {
+  
+  MetricsRecorder metrics(
+      "triton.metrics.layoutOp", 10, rewriter, op->getLoc());
+  
+      static constexpr std::array<int, 3> fpw{{2, 2, 1}};
   auto mmaEncoding = cast<NvidiaMmaEncodingAttr>(
       cast<DotOperandEncodingAttr>(
           cast<RankedTensorType>(resultTy).getEncoding())
@@ -321,7 +330,9 @@ static Value loadB(Value tensor, const SharedMemoryObject &smemObj,
     Value hb00 = bitcast(extract_element(hb, i32_val(0)), elemX2Ty);
     Value hb01 = bitcast(extract_element(hb, i32_val(1)), elemX2Ty);
     ld(hbs, n, K, hb00, hb01);
+    int cnt = 1;
     if (vecB > 4) {
+      cnt++;
       Value hb10 = bitcast(extract_element(hb, i32_val(2)), elemX2Ty);
       Value hb11 = bitcast(extract_element(hb, i32_val(3)), elemX2Ty);
       if (isBRow)
@@ -329,6 +340,7 @@ static Value loadB(Value tensor, const SharedMemoryObject &smemObj,
       else
         ld(hbs, n, K + 4, hb10, hb11);
     }
+    return cnt;
   };
 
   bool isBRow_ = mmaEncoding.getMMAv1IsRow(resultEncoding.getOpIdx());
@@ -341,12 +353,11 @@ static Value loadB(Value tensor, const SharedMemoryObject &smemObj,
   for (unsigned k = 0; k < NK; k += 4)
     for (unsigned n = 0; n < numN / 2; ++n) {
       if (!hbs.count({n, k})){
-          loadB(n, k);
-          cnt++;
+          cnt += loadB(n, k);
       }
     }
   
-  incrementMetric(rewriter, metricAlloca, loc, 0, cnt);
+  metrics.incrementBy(slot, cnt);
 
   SmallVector<Value> elems;
   for (auto &item : hbs) { // has is a map, the key should be ordered.
@@ -365,17 +376,17 @@ static Value loadB(Value tensor, const SharedMemoryObject &smemObj,
 
 namespace SharedToDotOperandMMAv1 {
 
-Value convertLayout(int opIdx, Value tensor, const SharedMemoryObject &smemObj,
+Value convertLayout(Operation* op, int opIdx, Value tensor, const SharedMemoryObject &smemObj,
                     Value thread, Location loc,
                     const LLVMTypeConverter *typeConverter,
-                    ConversionPatternRewriter &rewriter, Type resultTy, Value metricAlloca) {
+                    ConversionPatternRewriter &rewriter, Type resultTy) {
   if (opIdx == 0)
-    return loadA(tensor, smemObj, thread, loc, typeConverter, rewriter,
-                 resultTy, metricAlloca);
+    return loadA(op, tensor, smemObj, thread, loc, typeConverter, rewriter,
+                 resultTy, 0);
   else {
     assert(opIdx == 1);
-    return loadB(tensor, smemObj, thread, loc, typeConverter, rewriter,
-                 resultTy, metricAlloca);
+    return loadB(op, tensor, smemObj, thread, loc, typeConverter, rewriter,
+                 resultTy, 1);
   }
 }
 

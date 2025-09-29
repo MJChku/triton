@@ -113,6 +113,7 @@ public:
             || strRef.find("ctaid.") != std::string::npos
             || strRef.find("cp.") != std::string::npos
             || strRef.find("div.full.f32") != std::string::npos
+            || strRef.find("atom.") != std::string::npos
           ){
           return false;
         }

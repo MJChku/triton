@@ -77,11 +77,11 @@ class X86Driver(DriverBase):
         return X86Target()
 
 
-class X86Utils(object):
+class _X86Utils(object):
 
     def __new__(cls):
         if not hasattr(cls, "instance"):
-            cls.instance = super(X86Utils, cls).__new__(cls)
+            cls.instance = super(_X86Utils, cls).__new__(cls)
         return cls.instance
 
     def __init__(self):
@@ -124,11 +124,11 @@ class X86Utils(object):
 
 
 
-class _X86Utils(object):
+class X86Utils(object):
 
     def __new__(cls):
         if not hasattr(cls, "instance"):
-            cls.instance = super(_X86Utils, cls).__new__(cls)
+            cls.instance = super(X86Utils, cls).__new__(cls)
         return cls.instance
 
     def __init__(self):
@@ -169,7 +169,7 @@ class _X86Utils(object):
             'multiprocessor_count': 108,  # Fake multiprocessor count for x86
             'warpSize': 32,
             'max_num_regs': 65536,  # Fake register count for x86
-            'max_shared_mem': 1024*1024,  # 1MB fake shared memory
+            'max_shared_mem': 164*1024,  # 1MB fake shared memory
             'regs_per_multiprocessor': 65536,  # Fake register count
             'warp_size': 32,
             'mem_pitch': 2147483647,

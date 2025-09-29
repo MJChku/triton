@@ -16,6 +16,7 @@ using ::mlir::triton::gpu::getTotalElemsPerThread;
 using ::mlir::triton::gpu::ensureMetricsAlloc;
 using ::mlir::triton::gpu::incrementMetric;
 using ::mlir::triton::gpu::createDummyValue;
+using ::mlir::triton::gpu::MetricsRecorder;
 
 namespace {
 
@@ -57,9 +58,10 @@ public:
     assert(helper.isSupportedLayout() &&
            "Unexpected srcLayout in ReduceOpConversion");
     Location loc = op->getLoc();
+
   
     auto &tc = *getTypeConverter();
-    metricsAlloca = ensureMetricsAlloc("triton.metrics.reduce_op", 6, rewriter, tc, op->getParentOfType<LLVM::LLVMFuncOp>(), loc);
+
     llvm::errs() << "[Reduce op] [debug] alloca result type = " << "\n";
 
     auto srcValues = unpackInputs(loc, op, adaptor, rewriter);
@@ -67,7 +69,6 @@ public:
     std::map<SmallVector<unsigned>, SmallVector<Value>> indices;
     // First reduce all the values along axis within each thread.
     reduceWithinThreads(helper, srcValues, accs, indices, rewriter);
-
     // Then reduce across threads within a warp.
     reduceWithinWarps(helper, accs, rewriter);
 
@@ -104,32 +105,11 @@ public:
     // set output values
     loadReductionAndPackResult(helper, smemShape, smemBases, rewriter);
 
-  
-    replaceReduceWithDummy(rewriter, op);
-
     llvm::errs() << "[Reduce op] [debug] replace done " << "\n";
     return success();
   }
 
 private:
-
-  mutable Value metricsAlloca;
-
-
-  void replaceReduceWithDummy(RewriterBase &rewriter,
-                              triton::ReduceOp op) const {
-    Location loc = op.getLoc();
-      SmallVector<Value> dummies;
-    for (Type ty : op->getResultTypes()) {
-      Value v = createDummyValue(
-          rewriter, loc, ty, /*numElements=*/1);
-      dummies.push_back(v);
-    }
-
-    // Replace ReduceOp with the dummy values instead of erasing it
-    rewriter.replaceOp(op, dummies);
-  }
-
 
   const TargetInfoBase &targetInfo;
 
@@ -195,17 +175,24 @@ private:
   // Reduce along op axis for elements that are in the same thread. The
   // accumulated value is stored in accs.
   void reduceWithinThreads(
-      ReduceOpHelper &helper, SmallVector<SmallVector<Value>> &srcValues,
+     ReduceOpHelper &helper, SmallVector<SmallVector<Value>> &srcValues,
       std::map<SmallVector<unsigned>, SmallVector<Value>> &accs,
       std::map<SmallVector<unsigned>, SmallVector<Value>> &indices,
       ConversionPatternRewriter &rewriter) const {
 
-    // incrementMetric(rewriter, loc, kWithinThreadsSlot, 1);
-    return; 
 
 
     triton::ReduceOp op = helper.getOperation();
     RankedTensorType operandType = op.getInputTypes()[0];
+
+    int slot = 0;
+    MetricsRecorder metrics(
+        "triton.metrics.reduce", 10, rewriter, op->getLoc());
+
+    unsigned srcElems = getTotalElemsPerThread(operandType);
+    metrics.incrementBy(slot, srcElems);
+    return; 
+
     // Assumes offsets don't actually depend on type
     SmallVector<SmallVector<unsigned>> offsets =
         emitOffsetForLayout(helper.getSrcLayout(), operandType);
@@ -218,7 +205,9 @@ private:
       uniqueOffsets.insert({offsets[i], i});
     }
 
-    unsigned srcElems = getTotalElemsPerThread(operandType);
+    // unsigned srcElems = getTotalElemsPerThread(operandType);
+
+
     auto *combineOp = &op.getCombineOp();
     auto srcIndices = emitIndices(op.getLoc(), rewriter, targetInfo,
                                   helper.getSrcLayout(), operandType, true);
@@ -241,12 +230,15 @@ private:
     auto success =
         targetInfo.warpReduce(rewriter, loc, acc, op, numLaneToReduce);
     if (success){
-      incrementMetric(rewriter, metricsAlloca, loc, kNativeSlot, 1);
       return;
     }
-    
-    incrementMetric(rewriter, metricsAlloca, loc, kShuffleSlot, 1);
+  
+    int slot = 2;
+    MetricsRecorder metrics(
+        "triton.metrics.reduce", 10, rewriter, op->getLoc());
+
     for (unsigned N = numLaneToReduce / 2; N > 0; N >>= 1) {
+      metrics.increment(acc.size());
       SmallVector<Value> shfl(acc.size());
       for (unsigned i = 0; i < acc.size(); ++i) {
         shfl[i] = targetInfo.shuffleXor(rewriter, loc, acc[i], N * interleave);
@@ -378,10 +370,12 @@ private:
       SmallVector<Value> &smemBases,
       ConversionPatternRewriter &rewriter) const {
 
-    return;
 
     triton::ReduceOp op = helper.getOperation();
     Location loc = op.getLoc();
+
+    // return;
+
     Value threadId = getThreadId(rewriter, loc);
     auto srcLayout = helper.getSrcLayout();
     Value warpSize = i32_val(triton::gpu::getWarpSize(srcLayout));
@@ -427,6 +421,7 @@ private:
   void accumulatePartialReductions(ReduceOpHelper &helper,
                                    SmallVector<Value> &smemBases,
                                    ConversionPatternRewriter &rewriter) const {
+
     triton::ReduceOp op = helper.getOperation();
     auto srcLayout = helper.getSrcLayout();
     auto smemShape = helper.getScratchConfig();
@@ -480,7 +475,7 @@ private:
     }
   }
 
-  // Load the final reduction from shared memory and replace the reduce result
+ // Load the final reduction from shared memory and replace the reduce result
   // with it.
   void loadReductionAndPackResult(ReduceOpHelper &helper,
                                   SmallVector<unsigned> smemShape,
@@ -492,8 +487,6 @@ private:
     auto axis = op.getAxis();
     auto smemOrder = helper.getOrderWithAxisAtBeginning();
     SmallVector<Value> results(op.getNumOperands());
-    return;
-
     for (unsigned i = 0; i < op.getNumOperands(); ++i) {
       auto elemTy = getElementType(op, i);
       if (auto resultTy =

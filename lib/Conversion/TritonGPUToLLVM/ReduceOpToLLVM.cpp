@@ -188,6 +188,7 @@ private:
       accumulate(rewriter, op.getCombineOp(), acc, shfl, false);
     }
   }
+  
 
   // Reduce across threads within each warp.
   void

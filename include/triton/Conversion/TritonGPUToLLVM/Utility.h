@@ -208,6 +208,8 @@ enum class MetricId : unsigned int {
   WGMMA = 2,
 };
 
+
+
 Value createDummyValue(RewriterBase &rewriter,
                         Location loc,
                         Type elemTy,
@@ -222,7 +224,6 @@ void replaceOpWithDummyPacked(ConversionPatternRewriter &rewriter,
 Value ensureMetricsAlloc(StringRef kMarkerName,
                           unsigned kNumMetricsSlots,
                           RewriterBase &rewriter,
-                          const LLVMTypeConverter &tc,
                           LLVM::LLVMFuncOp llvmFunc,
                           Location loc);
 
@@ -231,6 +232,47 @@ void incrementMetric(RewriterBase &rewriter,
                       Location loc,
                       unsigned slotIdx,    // which slot to bump
                       uint32_t amount);
+
+struct MetricsRecorder {
+private:
+  RewriterBase &rewriter;
+  Location loc;
+  StringRef metricName;
+  Value metricsPtr;
+  unsigned numSlots;
+  
+public:
+  // default empty constructor
+  MetricsRecorder(StringRef kMarkerName,
+                  unsigned kNumMetricsSlots,
+                  RewriterBase &rewriter,
+                  Location loc)
+      : rewriter(rewriter), loc(loc), metricName(kMarkerName), numSlots(kNumMetricsSlots) {
+    // Allocate metrics storage
+    auto llvmFunc = rewriter.getBlock()->getParent()->getParentOfType<LLVM::LLVMFuncOp>();
+    metricsPtr = ensureMetricsAlloc(kMarkerName, kNumMetricsSlots, rewriter, llvmFunc, loc);
+  }
+  
+  // Increment a specific slot by 1
+  void increment(int slot) {
+    incrementMetric(rewriter, metricsPtr, loc, slot, 1);
+  }
+  
+  // Increment a specific slot by a custom amount
+  void incrementBy(int slot, int amount) {
+    incrementMetric(rewriter, metricsPtr, loc, slot, amount);
+  }
+  
+  // Get number of slots
+  int getNumSlots() const {
+    return numSlots;
+  }
+  
+  // Validate slot index
+  bool isValidSlot(int slot) const {
+    return slot >= 0 && slot < numSlots;
+  }
+};
 
 Type getFunctionType(Type resultType, ValueRange operands);
 

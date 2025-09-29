@@ -113,6 +113,9 @@ void debug_load_address(uint64_t address){
 }
 
 // NVIDIA math functions - map to standard C library equivalents
+// __nv_umulhi
+
+
 float __nv_exp2f(float x) {
     return exp2f(x);  // 2^x
 }
@@ -429,4 +432,43 @@ void x86Launcher(char* func_name,
         printf("Ending kernel: %s\n", func_name);
         metrics_free_all();
     }
+}
+
+// __nv_umulhi - unsigned multiply high
+// Returns the high 32 bits of the 64-bit product of two 32-bit unsigned integers
+uint32_t __nv_umulhi(uint32_t a, uint32_t b) {
+    uint64_t product = (uint64_t)a * (uint64_t)b;
+    return (uint32_t)(product >> 32);
+}
+
+// Also add the signed version if needed
+int32_t __nv_mulhi(int32_t a, int32_t b) {
+    int64_t product = (int64_t)a * (int64_t)b;
+    return (int32_t)(product >> 32);
+}
+
+// 64-bit versions if needed
+uint64_t __nv_umul64hi(uint64_t a, uint64_t b) {
+    // For 64-bit multiply high, we need to use 128-bit arithmetic
+    // GCC provides __uint128_t on x86-64
+    #ifdef __SIZEOF_INT128__
+    __uint128_t product = (__uint128_t)a * (__uint128_t)b;
+    return (uint64_t)(product >> 64);
+    #else
+    // Fallback implementation using multiple 32-bit multiplies
+    // This is more complex but works on systems without 128-bit support
+    uint64_t a_lo = a & 0xFFFFFFFFULL;
+    uint64_t a_hi = a >> 32;
+    uint64_t b_lo = b & 0xFFFFFFFFULL;
+    uint64_t b_hi = b >> 32;
+    
+    uint64_t p0 = a_lo * b_lo;
+    uint64_t p1 = a_lo * b_hi;
+    uint64_t p2 = a_hi * b_lo;
+    uint64_t p3 = a_hi * b_hi;
+    
+    uint64_t carry = ((p0 >> 32) + (p1 & 0xFFFFFFFFULL) + (p2 & 0xFFFFFFFFULL)) >> 32;
+    
+    return p3 + (p1 >> 32) + (p2 >> 32) + carry;
+    #endif
 }

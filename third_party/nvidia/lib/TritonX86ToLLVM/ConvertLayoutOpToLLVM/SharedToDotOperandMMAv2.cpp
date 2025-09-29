@@ -17,8 +17,9 @@ using ::mlir::triton::gpu::getSizePerThread;
 using ::mlir::triton::gpu::getTotalElemsPerThread;
 using ::mlir::triton::gpu::isaDistributedLayout;
 using ::mlir::triton::gpu::SharedEncodingAttr;
-using ::mlir::triton::gpu::incrementMetric;
+using ::mlir::triton::gpu::MetricsRecorder;
 using ::mlir::triton::gpu::createDummyValue;
+
 
 // Data loader for mma.16816 instruction.
 class MMA16816SmemLoader {
@@ -31,7 +32,7 @@ public:
                      int perPhase, int maxPhase, int elemBytes,
                      ConversionPatternRewriter &rewriter,
                      const LLVMTypeConverter *typeConverter,
-                     const Location &loc, Value metricsAlloca);
+                     const Location &loc);
 
   // lane = thread % 32
   // warpOff = (thread/32) % warpsPerTile(0)
@@ -52,12 +53,10 @@ public:
   SmallVector<Value> computeLdsMatOffs(Value lane, Value cSwizzleOffset);
 
   // Load 4 matrices and returns 4 vec<2> elements.
-  std::tuple<Value, Value, Value, Value> loadX4(int batch, int mat0, int mat1,
+  std::tuple<Value, Value, Value, Value, int> loadX4(int batch, int mat0, int mat1,
                                                 ArrayRef<Value> ptrs,
                                                 Type matTy,
                                                 Type shemPtrTy) const;
-
-  Value metricsAlloca;
 
 private:
   SmallVector<uint32_t> order;
@@ -305,7 +304,7 @@ SmallVector<Value> MMA16816SmemLoader::computeLdsMatOffs(Value lane,
   return offs;
 }
 
-std::tuple<Value, Value, Value, Value>
+std::tuple<Value, Value, Value, Value, int>
 MMA16816SmemLoader::loadX4(int batch, int mat0, int mat1, ArrayRef<Value> ptrs,
                            Type matTy, Type shemTy) const {
   assert(mat0 % 2 == 0 && mat1 % 2 == 0 && "smem matrix load must be aligned");
@@ -364,13 +363,12 @@ MMA16816SmemLoader::loadX4(int batch, int mat0, int mat1, ArrayRef<Value> ptrs,
 
                         
     // ldmatrix(resArgs, addrArg);
-    incrementMetric(rewriter, metricsAlloca, loc, 0, 1);
 
     // The result type is 4xi32, each i32 is composed of 2xf16
     // elements (adjacent two columns in a row) or a single f32 element.
     Value resV4 = builder.launch(rewriter, loc, resTy);
     return {extract_val(elemTy, resV4, 0), extract_val(elemTy, resV4, 1),
-            extract_val(elemTy, resV4, 2), extract_val(elemTy, resV4, 3)};
+            extract_val(elemTy, resV4, 2), extract_val(elemTy, resV4, 3), 1};
   } else {
     // base pointers
     std::array<std::array<Value, 4>, 2> ptrs;
@@ -431,7 +429,7 @@ MMA16816SmemLoader::loadX4(int batch, int mat0, int mat1, ArrayRef<Value> ptrs,
     if (isActualTrans)
       std::swap(retElems[1], retElems[2]);
     return {bitcast(retElems[0], i32_ty), bitcast(retElems[1], i32_ty),
-            bitcast(retElems[2], i32_ty), bitcast(retElems[3], i32_ty)};
+            bitcast(retElems[2], i32_ty), bitcast(retElems[3], i32_ty), 0};
   }
 }
 
@@ -442,7 +440,7 @@ MMA16816SmemLoader::MMA16816SmemLoader(
     ArrayRef<int> instrShape, ArrayRef<int> matShape,
     SmallVector<Value> multiDimWarpId, int perPhase, int maxPhase,
     int elemBytes, ConversionPatternRewriter &rewriter,
-    const LLVMTypeConverter *typeConverter, const Location &loc, Value given_metricsAlloca)
+    const LLVMTypeConverter *typeConverter, const Location &loc)
     : nPerWarp(nPerWarp), order(order.begin(), order.end()),
       warpsPerCTA(warpsPerCTA.begin(), warpsPerCTA.end()), kOrder(kOrder),
       kWidth(kWidth), tileShape(tileShape.begin(), tileShape.end()),
@@ -452,7 +450,6 @@ MMA16816SmemLoader::MMA16816SmemLoader(
       perPhase(perPhase), maxPhase(maxPhase), elemBytes(elemBytes),
       rewriter(rewriter), loc(loc), ctx(rewriter.getContext()) {
   
-  metricsAlloca = given_metricsAlloca;
 
   contiguousMatShape = matShape[order[0]];
   stridedMatShape = matShape[order[1]];
@@ -543,14 +540,14 @@ Value composeValuesToDotOperandLayoutStruct(
   return result;
 }
 
-std::function<void(int, int, int)>
+std::function<int(int, int, int)>
 getLoadMatrixFn(MemDescType descTy, const SharedMemoryObject &smemObj,
                 NvidiaMmaEncodingAttr mmaLayout, int warpsPerTile,
                 uint32_t kOrder, int kWidth, SmallVector<int> instrShape,
                 SmallVector<int> matShape, SmallVector<Value> multiDimWarpId,
                 Value lane, ValueTable &vals, bool isA,
                 const LLVMTypeConverter *typeConverter,
-                ConversionPatternRewriter &rewriter, Location loc, Value metricsAlloca) {
+                ConversionPatternRewriter &rewriter, Location loc) {
   auto shapePerCTA = getShapePerCTA(descTy);
   Type eltTy = descTy.getElementType();
   // We assumes that the input operand of Dot should be from shared layout.
@@ -571,7 +568,7 @@ getLoadMatrixFn(MemDescType descTy, const SharedMemoryObject &smemObj,
         nPerWarp, warpsPerTile, sharedLayout.getOrder(),
         mmaLayout.getWarpsPerCTA(), kOrder, kWidth, smemObj.strides,
         shapePerCTA /*tileShape*/, instrShape, matShape, multiDimWarpId,
-        perPhase, maxPhase, elemBytes, rewriter, typeConverter, loc, metricsAlloca);
+        perPhase, maxPhase, elemBytes, rewriter, typeConverter, loc);
     // Offset of a slice within the original tensor in shared memory
     Value cSwizzleOffset = smemObj.getCSwizzleOffset(order[0]);
     SmallVector<Value> offs = loader.computeOffsets(lane, cSwizzleOffset);
@@ -586,7 +583,8 @@ getLoadMatrixFn(MemDescType descTy, const SharedMemoryObject &smemObj,
     // actually load from shared memory
     auto matTy = LLVM::LLVMStructType::getLiteral(eltTy.getContext(),
                                                   SmallVector<Type>(4, i32_ty));
-    auto [ha0, ha1, ha2, ha3] = loader.loadX4(
+
+    auto [ha0, ha1, ha2, ha3, isLdMatrix] = loader.loadX4(
         batch, (kOrder == 2) ? a : b /*mat0*/, (kOrder == 2) ? b : a /*mat1*/,
         ptrs, matTy, getSharedMemTy(eltTy));
     if (!isA)
@@ -602,15 +600,20 @@ getLoadMatrixFn(MemDescType descTy, const SharedMemoryObject &smemObj,
     vals[{batch, a + 1, b}] = ha1;
     vals[{batch, a, b + 1}] = ha2;
     vals[{batch, a + 1, b + 1}] = ha3;
+    return isLdMatrix;
   };
 
   return load;
 }
 
-Value loadArg(ConversionPatternRewriter &rewriter, Location loc,
+Value loadArg(Operation *op, ConversionPatternRewriter &rewriter, Location loc,
               MemDescType descTy, DotOperandEncodingAttr encoding,
               const SharedMemoryObject &smemObj,
-              const LLVMTypeConverter *typeConverter, Value thread, bool isA, Value metricsAlloca) {
+              const LLVMTypeConverter *typeConverter, Value thread, bool isA, int slot) {
+
+  MetricsRecorder metrics(
+      "triton.metrics.layoutOp", 10, rewriter, op->getLoc());
+
   auto shapePerCTA = getShapePerCTA(descTy);
   int bitwidth = descTy.getElementTypeBitWidth();
   auto mmaLayout = mlir::cast<NvidiaMmaEncodingAttr>(encoding.getParent());
@@ -639,7 +642,7 @@ Value loadArg(ConversionPatternRewriter &rewriter, Location loc,
     warpsPerTile = std::min<int>(warpsPerCTA[1], shapePerCTA[1] / 16);
   else
     warpsPerTile = std::min<int>(warpsPerCTA[2], shapePerCTA[2] / 16);
-  std::function<void(int, int, int)> loadFn;
+  std::function<int(int, int, int)> loadFn;
   if (isA)
     loadFn = getLoadMatrixFn(
         descTy, smemObj, mmaLayout, warpsPerTile /*warpsPerTile*/, 2 /*kOrder*/,
@@ -647,7 +650,7 @@ Value loadArg(ConversionPatternRewriter &rewriter, Location loc,
         {1, matShapeM, matShapeK} /*matShape*/,
         {warpB, warpM, warpN} /*multiDimWarpId*/, lane /*laneId*/,
         vals /*vals*/, isA /*isA*/, typeConverter /* typeConverter */,
-        rewriter /*rewriter*/, loc /*loc*/, metricsAlloca);
+        rewriter /*rewriter*/, loc /*loc*/);
   else
     loadFn = getLoadMatrixFn(
         descTy, smemObj, mmaLayout, warpsPerTile /*warpsPerTile*/, 1 /*kOrder*/,
@@ -655,16 +658,26 @@ Value loadArg(ConversionPatternRewriter &rewriter, Location loc,
         {1, matShapeK, matShapeN} /*matShape*/,
         {warpB, warpM, warpN} /*multiDimWarpId*/, lane /*laneId*/,
         vals /*vals*/, isA /*isA*/, typeConverter /* typeConverter */,
-        rewriter /*rewriter*/, loc /*loc*/, metricsAlloca);
+        rewriter /*rewriter*/, loc /*loc*/);
 
   // Perform loading.
   int numRepBatch = numRep[0];
   int numRepOuter = isA ? numRep[1] : std::max<int>(numRep[2] / 2, 1);
   int numRepK = isA ? numRep[2] : numRep[1];
+  int cnt_matrix = 0;
+  int cnt_normal = 0;
   for (int b = 0; b < numRepBatch; ++b)
     for (int m = 0; m < numRepOuter; ++m)
-      for (int k = 0; k < numRepK; ++k)
-        loadFn(b, 2 * m, 2 * k);
+      for (int k = 0; k < numRepK; ++k){
+        int isLdMatrix = loadFn(b, 2 * m, 2 * k);
+        if( isLdMatrix)
+          cnt_matrix++;
+        else
+          cnt_normal++;
+      }
+    
+  metrics.incrementBy(slot, cnt_matrix);
+  metrics.incrementBy(slot + 1, cnt_normal);
 
   // Format the values to LLVM::Struct to passing to mma codegen.
   return composeValuesToDotOperandLayoutStruct(
@@ -780,10 +793,10 @@ getExpandedSharedMemoryObject(ConversionPatternRewriter &rewriter, Location loc,
 }
 
 namespace SharedToDotOperandMMAv2 {
-Value convertLayout(int opIdx, ConversionPatternRewriter &rewriter,
+Value convertLayout(Operation *op, int opIdx, ConversionPatternRewriter &rewriter,
                     Location loc, Value tensor, DotOperandEncodingAttr encoding,
                     const SharedMemoryObject &smemObj,
-                    const LLVMTypeConverter *typeConverter, Value thread, Value metricAlloca) {
+                    const LLVMTypeConverter *typeConverter, Value thread) {
   // Expand shared/dotOp to 3D before calling loadArg.
   auto descTy = cast<MemDescType>(tensor.getType());
   auto expandedDescTy = getExpandedDesc(descTy);
@@ -792,12 +805,12 @@ Value convertLayout(int opIdx, ConversionPatternRewriter &rewriter,
   auto expandedSmemObj =
       getExpandedSharedMemoryObject(rewriter, loc, smemObj, descTy.getShape());
   if (opIdx == 0)
-    return loadArg(rewriter, loc, expandedDescTy, expandedEncoding,
-                   expandedSmemObj, typeConverter, thread, true, metricAlloca);
+    return loadArg(op, rewriter, loc, expandedDescTy, expandedEncoding,
+                   expandedSmemObj, typeConverter, thread, true, 2);
   else {
     assert(opIdx == 1);
-    return loadArg(rewriter, loc, expandedDescTy, expandedEncoding,
-                   expandedSmemObj, typeConverter, thread, false, metricAlloca);
+    return loadArg(op, rewriter, loc, expandedDescTy, expandedEncoding,
+                   expandedSmemObj, typeConverter, thread, false, 2);
   }
 }
 } // namespace SharedToDotOperandMMAv2

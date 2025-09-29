@@ -12,6 +12,7 @@ using ::mlir::triton::gpu::NvidiaMmaEncodingAttr;
 using ::mlir::triton::gpu::MetricId;
 using ::mlir::triton::gpu::incrementMetric;
 using ::mlir::triton::gpu::replaceOpWithDummyPacked;
+using ::mlir::triton::gpu::MetricsRecorder;
 
 
 using ValueTable = std::map<std::pair<int, int>, std::pair<Value, Value>>;
@@ -44,8 +45,12 @@ static ValueTable extractLoadedOperand(Value llStruct, int NK,
 
 LogicalResult convertMMA884(triton::DotOp op, triton::DotOp::Adaptor adaptor,
                             const LLVMTypeConverter *typeConverter,
-                            ConversionPatternRewriter &rewriter,
-                            Value metricsAlloca) {
+                            ConversionPatternRewriter &rewriter) {
+  
+  int slot = 0;
+  MetricsRecorder metrics(
+      "triton.metrics.DotOp", 10, rewriter, op.getLoc());
+
   auto *ctx = op.getContext();
   auto loc = op.getLoc();
 
@@ -137,12 +142,12 @@ LogicalResult convertMMA884(triton::DotOp op, triton::DotOp::Adaptor adaptor,
 
     mma(resOprs, AOprs, BOprs, COprs);
 
-    Value res = builder.launch(rewriter, loc, getMmaRetType(ATensorTy));
+    // Value res = builder.launch(rewriter, loc, getMmaRetType(ATensorTy));
 
-    for (auto i = 0; i < 8; i++) {
-      Value elem = extract_val(f32_ty, res, i);
-      acc[idx[i]] = elem;
-    }
+    // for (auto i = 0; i < 8; i++) {
+    //   Value elem = extract_val(f32_ty, res, i);
+    //   acc[idx[i]] = elem;
+    // }
   };
 
   int cnt = 0;
@@ -152,8 +157,8 @@ LogicalResult convertMMA884(triton::DotOp op, triton::DotOp::Adaptor adaptor,
         // callMMA(m, n, k);
         cnt ++;
       }
-  
-  incrementMetric(rewriter, metricsAlloca, loc,  static_cast<unsigned>(MetricId::MMAv1), cnt);
+
+  metrics.incrementBy(slot, cnt);
 
   replaceOpWithDummyPacked(rewriter,
              *typeConverter,
@@ -161,17 +166,6 @@ LogicalResult convertMMA884(triton::DotOp op, triton::DotOp::Adaptor adaptor,
                 resSize,
                   DTensorTy.getElementType(),
                 DTensorTy);
-
-  return success();
-
-
-  // res holds the same layout of acc
-  for (size_t i = 0; i < acc.size(); ++i) {
-    resVals[i] = acc[i];
-  }
-
-  Value res = packLLElements(loc, typeConverter, resVals, rewriter, DTensorTy);
-  rewriter.replaceOp(op, res);
 
   return success();
 }

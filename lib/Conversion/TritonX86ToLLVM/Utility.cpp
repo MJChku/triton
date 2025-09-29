@@ -193,8 +193,37 @@ namespace triton::gpu {
         return rewriter.create<LLVM::ZExtOp>(loc, llElemTy, dummyI64);
       }
     }
-
+    else if(isa<VectorType>(elemTy)) {
+      auto vecTy = cast<VectorType>(elemTy);
+      Type elementType = vecTy.getElementType();
+      int64_t numElements = vecTy.getNumElements();
+      
+      // Create dummy values for each vector element
+      SmallVector<Value> dummyElements;
+      dummyElements.reserve(numElements);
+      
+      for (int64_t i = 0; i < numElements; ++i) {
+        Value singleDummy = createSingleDummyValue(rewriter, loc, elementType);
+        if (!singleDummy)
+          return nullptr;
+        dummyElements.push_back(singleDummy);
+      }
+      
+      // Build the vector from individual elements
+      Value vec = rewriter.create<LLVM::UndefOp>(loc, vecTy);
+      
+      for (int64_t i = 0; i < numElements; ++i) {
+        Value idx = rewriter.create<LLVM::ConstantOp>(
+            loc, rewriter.getI32Type(), rewriter.getI32IntegerAttr(i));
+        vec = rewriter.create<LLVM::InsertElementOp>(loc, vec, dummyElements[i], idx);
+      }
+      
+      return vec;
+    }
+    
     // 5) Unsupported type
+    llvm::errs() << "Unsupported element type for dummy value: " 
+             << elemTy << "\n";
     return nullptr;
   }
 
@@ -338,7 +367,6 @@ namespace triton::gpu {
     StringRef kFuncMarkerName,
     unsigned kNumMetricsSlots,
     RewriterBase &rewriter,
-    const LLVMTypeConverter &tc,
     LLVM::LLVMFuncOp llvmFunc,
     Location loc) {
   MLIRContext *ctx = rewriter.getContext();
@@ -353,7 +381,6 @@ namespace triton::gpu {
     // Build types: i32, i64, then pointer-to-i32
     Type i32Ty    = rewriter.getI32Type();
     Type i64Ty    = rewriter.getI64Type();
-    Type llvmI32  = tc.convertType(i32Ty);
     Type ptrI32Ty = LLVM::LLVMPointerType::get(ctx, /*addrSpace=*/0);
 
     // Create a constant i64 = kNumMetricsSlots
@@ -362,7 +389,7 @@ namespace triton::gpu {
 
     // Insert “llvm.alloca i32, i64 kNumMetricsSlots : (i32, i64) -> i32*”
     auto allocaOp = rewriter.create<LLVM::AllocaOp>(
-        loc, ptrI32Ty, llvmI32, cLong);
+        loc, ptrI32Ty, i32Ty, cLong);
     metricsAlloca = allocaOp.getResult();
 
     // ─── Use the same kFuncMarkerName as our attribute key on the AllocaOp ───

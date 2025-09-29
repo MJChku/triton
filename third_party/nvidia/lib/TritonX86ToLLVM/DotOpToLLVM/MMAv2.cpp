@@ -1,15 +1,15 @@
 #include "TritonNVIDIAGPUToLLVM/PTXAsmFormat.h"
 #include "Utility.h"
 #include "mlir/Support/LLVM.h"
+#include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 
 using namespace mlir;
 using namespace mlir::triton;
 
 using ::mlir::triton::gpu::DotOperandEncodingAttr;
 using ::mlir::triton::gpu::NvidiaMmaEncodingAttr;
-using ::mlir::triton::gpu::MetricId;
-using ::mlir::triton::gpu::incrementMetric;
 using ::mlir::triton::gpu::replaceOpWithDummyPacked;
+using ::mlir::triton::gpu::MetricsRecorder;
 
 using ValueTableV2 = std::map<std::array<int, 3>, Value>;
 
@@ -308,7 +308,10 @@ LogicalResult convertDot(const LLVMTypeConverter *typeConverter,
                          ConversionPatternRewriter &rewriter, Location loc,
                          Value a, Value b, Value c, Value d, Value loadedA,
                          Value loadedB, Value loadedC, DotOp op,
-                         DotOpAdaptor adaptor, bool isTuring, Value metricsAlloca) {
+                         DotOpAdaptor adaptor, bool isTuring, int slot) {
+  MetricsRecorder metrics(
+      "triton.metrics.DotOp", 10, rewriter, op.getLoc());
+
   MLIRContext *ctx = c.getContext();
   auto aTensorTy = cast<RankedTensorType>(a.getType());
   auto bTensorTy = cast<RankedTensorType>(b.getType());
@@ -371,14 +374,14 @@ LogicalResult convertDot(const LLVMTypeConverter *typeConverter,
                     isIntMMA);
     }
 
-    Value mmaOut =
-        builder.launch(rewriter, loc, getMmaRetType(mmaType, op.getContext()));
+    // Value mmaOut =
+    //     builder.launch(rewriter, loc, getMmaRetType(mmaType, op.getContext()));
 
-    Type elemTy = cast<LLVM::LLVMStructType>(mmaOut.getType()).getBody()[0];
-    for (int i = 0; i < numMmaRets; ++i) {
-      fc[(m * colsPerThread + 4 * n) / numCPackedElem + i + batchOffset * b] =
-          extract_val(elemTy, mmaOut, i);
-    }
+    // Type elemTy = cast<LLVM::LLVMStructType>(mmaOut.getType()).getBody()[0];
+    // for (int i = 0; i < numMmaRets; ++i) {
+    //   fc[(m * colsPerThread + 4 * n) / numCPackedElem + i + batchOffset * b] =
+    //       extract_val(elemTy, mmaOut, i);
+    // }
   };
 
   int cnt = 0;
@@ -390,7 +393,18 @@ LogicalResult convertDot(const LLVMTypeConverter *typeConverter,
           cnt++;
         }
 
-  incrementMetric(rewriter, metricsAlloca, loc, static_cast<unsigned>(MetricId::MMAv2), cnt);
+  bool isIntMMA = dTensorTy.getElementType().isInteger(32);
+  bool isAccF16 = dTensorTy.getElementType().isF16();
+
+  if (isTuring) {
+    if (isIntMMA) // Turing int8
+      metrics.incrementBy(slot, cnt*4); // 4 mma calls per int8 mma
+    else // Turing fp16
+      metrics.incrementBy(slot, cnt*2); // 2 mma calls per fp16 mma
+  } else { // Ampere
+      metrics.incrementBy(slot, cnt); // 1 mma call per mma
+  }
+    
   Type resElemTy = dTensorTy.getElementType();
 
   // replace with new packed result
@@ -423,7 +437,7 @@ LogicalResult convertDot(const LLVMTypeConverter *typeConverter,
 
 LogicalResult convertMMA(triton::DotOp op, triton::DotOp::Adaptor adaptor,
                          const LLVMTypeConverter *typeConverter,
-                         ConversionPatternRewriter &rewriter, bool isTuring, Value metricsAlloca) {
+                         ConversionPatternRewriter &rewriter, bool isTuring, int slot) {
   assert(mlir::isa<DotOperandEncodingAttr>(op.getA().getType().getEncoding()) &&
          mlir::isa<DotOperandEncodingAttr>(op.getB().getType().getEncoding()) &&
          "Both $a and %b should be DotOperand layout.");
@@ -432,22 +446,23 @@ LogicalResult convertMMA(triton::DotOp op, triton::DotOp::Adaptor adaptor,
       loadC(op.getC(), adaptor.getC(), typeConverter, op.getLoc(), rewriter);
   return convertDot(typeConverter, rewriter, op.getLoc(), op.getA(), op.getB(),
                     op.getC(), op.getD(), adaptor.getA(), adaptor.getB(),
-                    loadedC, op, adaptor, isTuring, metricsAlloca);
+                    loadedC, op, adaptor, isTuring, slot);
 }
 
 // Convert to mma.m16n8k8
 LogicalResult convertMMA1688(triton::DotOp op, triton::DotOp::Adaptor adaptor,
                              const LLVMTypeConverter *typeConverter,
-                             ConversionPatternRewriter &rewriter,
-                             Value metricsAlloca
+                             ConversionPatternRewriter &rewriter
                             ) {
-  return convertMMA(op, adaptor, typeConverter, rewriter, true /*isTuring*/, metricsAlloca);
+  int slot = 1;
+  return convertMMA(op, adaptor, typeConverter, rewriter, true /*isTuring*/, slot);
 }
 
 // Convert to mma.m16n8k16
 LogicalResult convertMMA16816(triton::DotOp op, triton::DotOp::Adaptor adaptor,
                               const LLVMTypeConverter *typeConverter,
-                              ConversionPatternRewriter &rewriter,
-                              Value metricsAlloca) {
-  return convertMMA(op, adaptor, typeConverter, rewriter, false /*isTuring*/, metricsAlloca);
+                              ConversionPatternRewriter &rewriter
+                              ) {
+  int slot = 2;
+  return convertMMA(op, adaptor, typeConverter, rewriter, false /*isTuring*/, slot);
 }

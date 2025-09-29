@@ -355,6 +355,7 @@ struct ConvertGlobalInline : public ConversionPattern{
         && strRef.find("cp.") == std::string::npos
         && strRef.find("div.full.f32") == std::string::npos
         && strRef.find("prmt.b32") == std::string::npos
+        && strRef.find("atom.") == std::string::npos
       ){
       return failure(); 
     }
@@ -376,6 +377,34 @@ struct ConvertGlobalInline : public ConversionPattern{
     Location loc = op->getLoc();
     
     llvm::errs() << "Converting InlineAsmOp: " << asmStr << "\n";
+
+    /* ---------- SHARED MEMORY STORE ---------------------------------------- */
+    if (isStoreShared) {
+      llvm::errs() << "Converting st.shared: " << asmStr << "\n";
+      
+      if (asmOp.getNumOperands() != 3) return failure();
+      if (asmOp.getNumResults() != 1) return failure();
+      
+      Type resTy = asmOp.getResult(0).getType();
+      if (!mlir::isa<LLVM::LLVMVoidType>(resTy))
+        return failure();
+      
+      Value ptr = asmOp.getOperand(0);   // $0 - destination pointer
+      Value val = asmOp.getOperand(1);   // $1 - value to store
+      Value pred = asmOp.getOperand(2);  // $2 - predicate
+      
+      if (pred) {
+        Value oldVal = rewriter.create<LLVM::LoadOp>(loc, val.getType(), ptr);
+        Value newVal = rewriter.create<LLVM::SelectOp>(loc, pred, val, oldVal);
+        rewriter.create<LLVM::StoreOp>(loc, newVal, ptr);
+      } else {
+        rewriter.create<LLVM::StoreOp>(loc, val, ptr);
+      }
+      
+      rewriter.eraseOp(op);
+      return success();
+    }
+  
     /* ---------- PRMT.B32 BYTE PERMUTE ---------------------------------------- */
     if (isPrmt) {
       llvm::errs() << "Converting PTX prmt.b32: " << asmStr << "\n";

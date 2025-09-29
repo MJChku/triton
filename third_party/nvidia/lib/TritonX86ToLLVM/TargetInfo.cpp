@@ -12,6 +12,8 @@ using mlir::LLVM::getWrappedMultiDimOffset;
 using ::mlir::LLVM::linearize;
 using ::mlir::triton::gpu::getShapePerCTA;
 using ::mlir::triton::gpu::getShapePerCTATile;
+using ::mlir::triton::gpu::MetricsRecorder;
+
 namespace {
 Value computeStMatrixAddr(Value laneId, int matStride, Location loc,
                           ConversionPatternRewriter &rewriter,
@@ -35,6 +37,12 @@ Value computeStMatrixAddr(Value laneId, int matStride, Location loc,
 void stMatrixm8n8x4(Value offset, ArrayRef<Value> vals, int indexOffset,
                     Value smemBase, Type elemTy, Location loc,
                     ConversionPatternRewriter &rewriter) {
+  
+  MetricsRecorder metrics(
+        "triton.metrics.targetinfo", 10, rewriter,
+        loc);
+  metrics.increment(4);
+
   SmallVector<Value> inputs;
   auto prTy = ptr_ty(rewriter.getContext(), 3);
   // Pack the input into 2xf16
@@ -262,6 +270,11 @@ Value TargetInfo::getClusterCTAId(RewriterBase &rewriter, Location loc) const {
 
 Value TargetInfo::ballot(ConversionPatternRewriter &rewriter, Location loc,
                          Type type, Value cmp) const {
+  MetricsRecorder metrics(
+      "triton.metrics.targetinfo", 10, rewriter,
+      loc);
+  metrics.increment(0);
+      
   Value threadMask = int_val(type.getIntOrFloatBitWidth(), -1);
   return rewriter.create<NVVM::VoteBallotOp>(loc, type, threadMask, cmp);
 }
@@ -284,6 +297,12 @@ void TargetInfo::storeShared(ConversionPatternRewriter &rewriter, Location loc,
                              Value ptr, Value val, Value pred) const {
   MLIRContext *ctx = rewriter.getContext();
   
+  MetricsRecorder metrics(
+        "triton.metrics.targetinfo", 10, rewriter,
+        loc);
+  metrics.increment(1);
+
+
   if (pred) {
     Value oldVal = rewriter.create<LLVM::LoadOp>(loc, val.getType(), ptr);
     Value newVal = rewriter.create<LLVM::SelectOp>(loc, pred, val, oldVal);
@@ -299,6 +318,12 @@ Value TargetInfo::loadShared(ConversionPatternRewriter &rewriter, Location loc,
   MLIRContext *ctx = rewriter.getContext();
   auto ptrTy = cast<LLVM::LLVMPointerType>(ptr.getType());
   
+  MetricsRecorder metrics(
+      "triton.metrics.targetinfo", 10, rewriter,
+      loc);
+
+  metrics.increment(2);
+
   if (pred) {
     // Conditional load with zero fallback
     Value condition = pred;
@@ -374,6 +399,11 @@ bool TargetInfo::warpReduce(ConversionPatternRewriter &rewriter, Location loc,
 
     // return true;
 
+    MetricsRecorder metrics(
+        "triton.metrics.targetinfo", 10, rewriter,
+        loc);
+  
+
     // Based on benchmarking on A100 redux op gives a speed up only when doing
     // a single reduction (not partitioned) and when the mask is static.
     // Therefore we currently only enable it to reduce across all the lanes.
@@ -404,6 +434,7 @@ bool TargetInfo::warpReduce(ConversionPatternRewriter &rewriter, Location loc,
         if (bitwidth < 32)
           acc[i] = trunc(int_ty(bitwidth), acc[i]);
       }
+      metrics.incrementBy(3, acc.size());
       return true;
     }
   }
@@ -420,6 +451,7 @@ bool TargetInfo::processReplicaUsingStMatrix(
     storeDistributedToSharedWithStMatrix(srcTy, elemTy, vals, smemBase,
                                          paddedRepShape, origRepShape, loc,
                                          rewriter, swizzlingByteWidth);
+    
     return true;
   }
   return false;

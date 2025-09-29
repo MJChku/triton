@@ -36,6 +36,7 @@ using ::mlir::triton::gpu::SharedEncodingAttr;
 using ::mlir::triton::gpu::MetricId;
 using ::mlir::triton::gpu::incrementMetric;
 using ::mlir::triton::gpu::replaceOpWithDummyPacked;
+using ::mlir::triton::gpu::MetricsRecorder;
 
 triton::nvgpu::WGMMAEltType getMmaRetType(Value d) {
   auto dTy = cast<RankedTensorType>(d.getType()).getElementType();
@@ -363,7 +364,10 @@ LogicalResult convertDot(const LLVMTypeConverter *typeConverter,
                          Operation *op, Value a, Value b, Value c, Value d,
                          Value loadedA, Value loadedB, Value loadedC,
                          bool allowTF32, uint32_t maxNumImpreciseAcc, bool sync,
-                         Value thread, Value metricAlloca) {
+                         Value thread, int slot) {
+  MetricsRecorder metrics(
+      "triton.metrics.DotOp", 10, rewriter, op->getLoc());
+ 
   auto aTensorTy = cast<TensorOrMemDesc>(a.getType());
   auto bTensorTy = cast<TensorOrMemDesc>(b.getType());
   auto dTensorTy = cast<RankedTensorType>(d.getType());
@@ -490,8 +494,8 @@ LogicalResult convertDot(const LLVMTypeConverter *typeConverter,
     }
   }
   
-  incrementMetric(rewriter, metricAlloca, loc, static_cast<unsigned>(MetricId::WGMMA), cnt);
-
+  metrics.incrementBy(slot, cnt);
+  
   SmallVector<Value> results =
       unpackAccumulator(rewriter, loc, mmaResults, dTensorTy);
   
@@ -521,33 +525,35 @@ LogicalResult convertDot(const LLVMTypeConverter *typeConverter,
 
 LogicalResult convertWGMMA(triton::DotOp op, triton::DotOp::Adaptor adaptor,
                            const LLVMTypeConverter *typeConverter,
-                           ConversionPatternRewriter &rewriter, Value thread, Value metricsAlloca) {
+                           ConversionPatternRewriter &rewriter, Value thread) {
   auto AEnc = op.getA().getType().getEncoding();
   auto BEnc = op.getB().getType().getEncoding();
   assert((mlir::isa<SharedEncodingAttr, DotOperandEncodingAttr>(AEnc)));
   assert(mlir::isa<SharedEncodingAttr>(BEnc) &&
          "Operand B should use Shared layout.");
+  int slot = 3;
   return convertDot(typeConverter, rewriter, op.getLoc(), op.getOperation(), //
                     op.getA(), op.getB(), op.getC(), op.getD(),              //
                     adaptor.getA(), adaptor.getB(), adaptor.getC(),          //
                     op.getInputPrecision() == InputPrecision::TF32,
-                    op.getMaxNumImpreciseAcc(), true, thread, metricsAlloca);
+                    op.getMaxNumImpreciseAcc(), true, thread, slot);
 }
 
 LogicalResult convertAsyncWGMMA(triton::nvidia_gpu::DotAsyncOp op,
                                 triton::nvidia_gpu::DotAsyncOp::Adaptor adaptor,
                                 const LLVMTypeConverter *typeConverter,
                                 ConversionPatternRewriter &rewriter,
-                                Value thread, Value metricsAlloca) {
+                                Value thread) {
   auto AEnc = op.getA().getType().getEncoding();
   auto BEnc = op.getB().getType().getEncoding();
   assert(mlir::isa<SharedEncodingAttr>(AEnc) ||
          mlir::isa<DotOperandEncodingAttr>(AEnc));
   assert(mlir::isa<SharedEncodingAttr>(BEnc) &&
          "Operand B should use Shared layout.");
+  int slot = 4;
   return convertDot(typeConverter, rewriter, op.getLoc(), op.getOperation(), //
                     op.getA(), op.getB(), op.getC(), op.getD(),              //
                     adaptor.getA(), adaptor.getB(), adaptor.getC(),
                     op.getInputPrecision() == InputPrecision::TF32,
-                    op.getMaxNumImpreciseAcc(), false, thread, metricsAlloca);
+                    op.getMaxNumImpreciseAcc(), false, thread, slot);
 }

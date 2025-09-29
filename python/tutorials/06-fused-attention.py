@@ -86,13 +86,13 @@ configs = [
     for w in [4, 8]\
 ]
 
-configs = [
-    triton.Config({'BLOCK_M': BM, 'BLOCK_N': BN}, num_stages=s, num_warps=w) \
-    for BM in [64]\
-    for BN in [64]\
-    for s in ([1] if is_hip() else [3])\
-    for w in [4]\
-]
+# configs = [
+#     triton.Config({'BLOCK_M': BM, 'BLOCK_N': BN}, num_stages=s, num_warps=w) \
+#     for BM in [64]\
+#     for BN in [64]\
+#     for s in ([1] if is_hip() else [3])\
+#     for w in [4]\
+# ]
 
 
 def keep(conf):

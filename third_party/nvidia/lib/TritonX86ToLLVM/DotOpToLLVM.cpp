@@ -11,35 +11,28 @@ using ::mlir::LLVM::getSharedMemoryObjectFromStruct;
 using ::mlir::triton::gpu::DotOperandEncodingAttr;
 using ::mlir::triton::gpu::getShapePerCTA;
 using ::mlir::triton::gpu::NvidiaMmaEncodingAttr;
-using ::mlir::triton::gpu::ensureMetricsAlloc;
-using ::mlir::triton::gpu::incrementMetric;
 
 LogicalResult convertMMA884(triton::DotOp op, triton::DotOp::Adaptor adaptor,
                             const LLVMTypeConverter *typeConverter,
-                            ConversionPatternRewriter &rewriter, 
-                            Value metricsAlloca);
+                            ConversionPatternRewriter &rewriter);
 
 LogicalResult convertMMA1688(triton::DotOp op, triton::DotOp::Adaptor adaptor,
                              const LLVMTypeConverter *typeConverter,
-                             ConversionPatternRewriter &rewriter,
-                             Value metricsAlloca);
+                             ConversionPatternRewriter &rewriter);
 
 LogicalResult convertMMA16816(triton::DotOp op, triton::DotOp::Adaptor adaptor,
                               const LLVMTypeConverter *typeConverter,
-                              ConversionPatternRewriter &rewriter,
-                              Value metricsAlloca);
+                              ConversionPatternRewriter &rewriter);
 
 LogicalResult convertWGMMA(triton::DotOp op, triton::DotOp::Adaptor adaptor,
                            const LLVMTypeConverter *typeConverter,
-                           ConversionPatternRewriter &rewriter, Value thread,
-                           Value metricsAlloca);
+                           ConversionPatternRewriter &rewriter, Value thread);
 
 LogicalResult convertAsyncWGMMA(triton::nvidia_gpu::DotAsyncOp op,
                                 triton::nvidia_gpu::DotAsyncOp::Adaptor adaptor,
                                 const LLVMTypeConverter *typeConverter,
                                 ConversionPatternRewriter &rewriter,
-                                Value thread,
-                                Value metricsAlloca);
+                                Value thread);
 namespace {
 struct DotOpConversion : public ConvertOpToLLVMPattern<triton::DotOp> {
   using ConvertOpToLLVMPattern<triton::DotOp>::ConvertOpToLLVMPattern;
@@ -47,10 +40,7 @@ struct DotOpConversion : public ConvertOpToLLVMPattern<triton::DotOp> {
   LogicalResult
   matchAndRewrite(triton::DotOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    
-  metricsAlloca = ensureMetricsAlloc("triton.metrics.dot", 6, rewriter,
-        *getTypeConverter(), op->getParentOfType<LLVM::LLVMFuncOp>(),
-         op->getLoc());
+
 
     Location loc = op->getLoc();
     // D = A * B + C
@@ -67,14 +57,14 @@ struct DotOpConversion : public ConvertOpToLLVMPattern<triton::DotOp> {
         cast<RankedTensorType>(D.getType()).getEncoding());
     if (!isOuter && mmaLayout && supportMMA(op, mmaLayout.getVersionMajor())) {
       if (mmaLayout.isVolta())
-        return convertMMA884(op, adaptor, getTypeConverter(), rewriter,  metricsAlloca);
+        return convertMMA884(op, adaptor, getTypeConverter(), rewriter);
       if (mmaLayout.isTuring())
-        return convertMMA1688(op, adaptor, getTypeConverter(), rewriter, metricsAlloca);
+        return convertMMA1688(op, adaptor, getTypeConverter(), rewriter);
       if (mmaLayout.isAmpere())
-        return convertMMA16816(op, adaptor, getTypeConverter(), rewriter, metricsAlloca);
+        return convertMMA16816(op, adaptor, getTypeConverter(), rewriter);
       if (mmaLayout.isHopper())
         return convertWGMMA(op, adaptor, getTypeConverter(), rewriter,
-                            getThreadId(rewriter, loc), metricsAlloca);
+                            getThreadId(rewriter, loc));
 
       llvm::report_fatal_error(
           "Unsupported MMA kind found when converting DotOp to LLVM.");
@@ -100,11 +90,6 @@ struct DotAsyncOpConversion
   LogicalResult
   matchAndRewrite(triton::nvidia_gpu::DotAsyncOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    
-    metricsAlloca = ensureMetricsAlloc(
-        "triton.metrics.dot_async", 6, rewriter,
-        *getTypeConverter(), op->getParentOfType<LLVM::LLVMFuncOp>(),
-        op.getLoc());
 
     auto loc = op.getLoc();
     // D = A * B + C
@@ -123,7 +108,7 @@ struct DotAsyncOpConversion
         supportMMA(op.getOperand(0), mmaLayout.getVersionMajor())) {
       if (mmaLayout.isHopper()) {
         return convertAsyncWGMMA(op, adaptor, getTypeConverter(), rewriter,
-                                 getThreadId(rewriter, loc), metricsAlloca);
+                                 getThreadId(rewriter, loc));
       }
 
       llvm::report_fatal_error(
@@ -134,8 +119,6 @@ struct DotAsyncOpConversion
         "Unsupported DotAsyncOp found when converting TritonGPU to LLVM.");
   }
 
-  public:
-    mutable Value metricsAlloca;
 };
 
 struct DotWaitOpConversion
@@ -198,9 +181,6 @@ struct DotWaitOpConversion
     rewriter.replaceOp(op, outputs);
     return success();
   }
-
-  public:
-    mutable Value metricsAlloca;
 };
 } // namespace
 
